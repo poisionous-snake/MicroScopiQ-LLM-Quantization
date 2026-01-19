@@ -113,6 +113,7 @@ class GPTQ:
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
             # print("HINV Shape", W.shape, W1.shape, Hinv.shape, Hinv1.shape)
+            mask_buffer = None
             for i in range(count):
                 w = W1[:, i]
                 d = Hinv1[i, i]
@@ -127,6 +128,21 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
+                if i % 4 == 0:
+                    if i + 4 <= count:
+                        w_group = W1[:, i:(i + 4)].clone()
+                    
+                        # scores = w_group.abs()
+
+                        diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + 4)], device=self.dev)
+                        scores = (w_group ** 2) / diag_group
+                        
+                        _, indices_to_prune = torch.topk(scores, k=2, dim=1, largest=False)
+                        mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
+                        mask_buffer.scatter_(dim=1, index=indices_to_prune, value=False)
+                    else:
+                        mask_buffer = None
+                
                 q, num_outliers_per_block = quantize_mx_outlier_hessian(
                     w.unsqueeze(1),
                     self.quantizer.inlier_scale_bits,
@@ -142,6 +158,10 @@ class GPTQ:
                     self.quantizer.custom_cuda
                 )
                 q = q.flatten()
+
+                if mask_buffer is not None:
+                    col_mask = mask_buffer[:, i % 4]
+                    q = q * col_mask
                 # print(q.shape)
                 # importance = (q ** 2) / d ** 2
                 # num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
