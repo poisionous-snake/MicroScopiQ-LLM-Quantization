@@ -395,7 +395,7 @@ class MXQuantizer(nn.Module):
     def __init__(self, shape=1):
         super(MXQuantizer, self).__init__()
         self.mx_specs =  {
-        'w_elem_format': 'fp4',
+        'w_elem_format': 'int4',
         'a_elem_format': 'fp16',
         'block_size': 128,
         'custom_cuda': False,
