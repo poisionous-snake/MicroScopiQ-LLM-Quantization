@@ -233,8 +233,8 @@ def opt_eval(model, testenc, dev):
     nlls = []
     for i in range(nsamples):
         hidden_states = inps[i].unsqueeze(0)
-        if model.model.decoder.layers.final_layer_norm is not None:
-            hidden_states = model.model.decoder.layers.final_layer_norm(hidden_states)
+        if model.model.decoder.final_layer_norm is not None:
+            hidden_states = model.model.decoder.final_layer_norm(hidden_states)
         if model.model.decoder.project_out is not None:
             hidden_states = model.model.decoder.project_out(hidden_states)
         lm_logits = model.lm_head(hidden_states)
