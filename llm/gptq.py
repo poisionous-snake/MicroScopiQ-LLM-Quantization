@@ -135,7 +135,7 @@ class GPTQ:
                         # scores = w_group.abs()
 
                         diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + 4)], device=self.dev)
-                        scores = (w_group ** 2) / diag_group
+                        scores = (w_group ** 2) / (diag_group ** 2)
                         
                         _, indices_to_prune = torch.topk(scores, k=2, dim=1, largest=False)
                         mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
