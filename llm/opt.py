@@ -87,7 +87,7 @@ def opt_sequential(model, dataloader, dev):
             gptq[name].quantizer.configure(
                 inlier_scale_bits = 8,
                 outlier_scale_bits = 8,
-                inlier_elem_format = 'int2',
+                inlier_elem_format = 'fp4',
                 outlier_elem_format = 'fp4',
                 axes = [0],
                 block_size=16
@@ -194,7 +194,7 @@ def opt_eval(model, testenc, dev):
                 quantizer.configure(
                 inlier_scale_bits = 8,
                 outlier_scale_bits = 8,
-                inlier_elem_format = 'int2',
+                inlier_elem_format = 'fp4',
                 outlier_elem_format = 'fp4',
                 axes=[0],
                 block_size=16

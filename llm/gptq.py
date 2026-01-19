@@ -134,7 +134,7 @@ class GPTQ:
                     self.quantizer.inlier_elem_format,    # can be None for no quantization
                     self.quantizer.outlier_elem_format,    # can be None for no quantization
                     self.quantizer.shared_exp_method,
-                    self.quantizer.std_dev,
+                    float('inf'),     # guarantee there is no outlier, mx only
                     self.quantizer.axes,
                     self.quantizer.block_size,
                     self.quantizer.round,
@@ -143,14 +143,14 @@ class GPTQ:
                 )
                 q = q.flatten()
                 # print(q.shape)
-                importance = (q ** 2) / d ** 2
-                num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
-                # print(num_outliers)
-                # Find the indices of the 10 least important weights
-                least_important_indices = torch.topk(importance, num_outliers, largest=False).indices
+                # importance = (q ** 2) / d ** 2
+                # num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
+                # # print(num_outliers)
+                # # Find the indices of the 10 least important weights
+                # least_important_indices = torch.topk(importance, num_outliers, largest=False).indices
                 
-                # Set the 10 least important weights in q to 0
-                q[least_important_indices] = 0
+                # # Set the 10 least important weights in q to 0
+                # q[least_important_indices] = 0
 
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
