@@ -58,8 +58,10 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0
     ):
+        # 打印N:M
+        print(f"Applying {prunen}:{prunem} pruning during quantization.")
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -127,17 +129,17 @@ class GPTQ:
                         if actorder:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
-
-                if i % 4 == 0:
-                    if i + 4 <= count:
-                        w_group = W1[:, i:(i + 4)].clone()
+                
+                if prunen != 0 and i % prunem == 0:
+                    if i + prunem <= count:
+                        w_group = W1[:, i:(i + prunem)].clone()
                     
                         # scores = w_group.abs()
 
-                        diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + 4)], device=self.dev)
+                        diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + prunem)], device=self.dev)
                         scores = (w_group ** 2) / (diag_group ** 2)
                         
-                        _, indices_to_prune = torch.topk(scores, k=2, dim=1, largest=False)
+                        _, indices_to_prune = torch.topk(scores, k=prunen, dim=1, largest=False)
                         mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
                         mask_buffer.scatter_(dim=1, index=indices_to_prune, value=False)
                     else:
@@ -160,7 +162,7 @@ class GPTQ:
                 q = q.flatten()
 
                 if mask_buffer is not None:
-                    col_mask = mask_buffer[:, i % 4]
+                    col_mask = mask_buffer[:, i % prunem]
                     q = q * col_mask
                 # print(q.shape)
                 # importance = (q ** 2) / d ** 2
