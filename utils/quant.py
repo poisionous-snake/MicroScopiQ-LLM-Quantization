@@ -50,25 +50,29 @@ def quantize_mx_outlier_hessian(
 
     # Get parameters of the inlier and outlier formats
     ebits_in, mbits_in, emax_in, max_norm_in, _ = _get_format_params(inlier_elem_format)
+    # 打印inliner_elem_format参数
+    print("Inlier Format Params:", inlier_elem_format, ebits_in, mbits_in, emax_in, max_norm_in)
     ebits_out, mbits_out, emax_out, max_norm_out, _ = _get_format_params(outlier_elem_format)
 
     # Perform tiling to the hardware vector size
     if block_size > 0:
+        print(f"axes: {axes}, block_size: {block_size}")
         A, axes, orig_shape, padded_shape = _reshape_to_blocks(
             A, axes, block_size
-        )
+        ) # TODO：
+        print(f"axes: {axes}, block_size: {block_size}, orig_shape: {orig_shape}, padded_shape: {padded_shape}")
     
     # Estimate axis to calculate shared exponent
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
     # Extract Outliers position for each block
-    outlier_pos = _extract_outlier_indices(A, std_dev, shared_exp_axes)
-    num_outliers = (outlier_pos[::block_size, :, :].sum(axis=-2, keepdim=False).flatten()).to(torch.int8)
+    # outlier_pos = _extract_outlier_indices(A, std_dev, shared_exp_axes)
+    # num_outliers = (outlier_pos[::block_size, :, :].sum(axis=-2, keepdim=False).flatten()).to(torch.int8)
     # print(num_outliers.shape)
     #print("Outlier_Pos", outlier_pos)
     # Get inliers based on complement on outlier position
-    inlier_val = A * (1.0 - outlier_pos)
-    outlier_val = A * outlier_pos
+    inlier_val = A #* (1.0 - outlier_pos)
+    # outlier_val = A * outlier_pos
 
     # Get shared exponents for inliers
     shared_exp_in = _shared_exponents(
@@ -83,7 +87,8 @@ def quantize_mx_outlier_hessian(
     # in the element data format
 
     shared_exp_in = shared_exp_in - emax_in
-    scale_emax_in = 2**(inlier_scale_bits-1) - 1
+    scale_emax_in = 2**(inlier_scale_bits-1) - 1 # 2**(8-1) - 1 
+    print("shared_exp_in: ", shared_exp_in)
 
     shared_exp_in[shared_exp_in > scale_emax_in] = float("NaN")
     shared_exp_in[shared_exp_in < -scale_emax_in] = -20 if (-scale_emax_in < -20) else -scale_emax_in
@@ -92,7 +97,7 @@ def quantize_mx_outlier_hessian(
     inlier_val = inlier_val / (2**shared_exp_in)
     # Level-1 scaling of outliers
     outlier_val = outlier_val * (2**shared_exp_in)
-    # Quantize inliers
+    # Quantize inliers MX标准舍入
     inlier_val = _quantize_elemwise_core(
                 inlier_val, mbits_in, ebits_in, max_norm_in, round=round,
                 allow_denorm=True, saturate_normals=True,
@@ -104,46 +109,46 @@ def quantize_mx_outlier_hessian(
     assert not torch.isnan(outlier_val).any(), "outlier_val 1 contains NaN values"
     #*****************************************************
     # Get shared exponents for outliers
-    shared_exp_out = _shared_exponents(
-        outlier_val, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
-    )
-    assert not torch.isnan(shared_exp_out).any(), "shared_exp_out contains NaN values"
+    # shared_exp_out = _shared_exponents(
+    #     outlier_val, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
+    # )
+    # assert not torch.isnan(shared_exp_out).any(), "shared_exp_out contains NaN values"
     # No need to check for subnorm for outliers, if they were subnormal, they wouldn't be outliers
     # if flush_fp32_subnorms:
     #     outlier_val = outlier_val * (shared_exp_out > -FP32_EXPONENT_BIAS).type(outlier_val.dtype)
     
-    shared_exp_out = shared_exp_out - emax_out
+    # shared_exp_out = shared_exp_out - emax_out
 
-    scale_emax_out = 2**(outlier_scale_bits-1) - 1
-    # print("Scale EMAX OUt", scale_emax_out)
-    shared_exp_out[shared_exp_out > scale_emax_out] = float("NaN")
-    shared_exp_out[shared_exp_out < -scale_emax_out] = -20 if (-scale_emax_out < -20) else -scale_emax_out
+    # scale_emax_out = 2**(outlier_scale_bits-1) - 1
+    # # print("Scale EMAX OUt", scale_emax_out)
+    # shared_exp_out[shared_exp_out > scale_emax_out] = float("NaN")
+    # shared_exp_out[shared_exp_out < -scale_emax_out] = -20 if (-scale_emax_out < -20) else -scale_emax_out
     
-    assert not torch.isnan(shared_exp_out).any(), "shared_exp_out contains NaN values"
+    # assert not torch.isnan(shared_exp_out).any(), "shared_exp_out contains NaN values"
     # Level-2 scaling of outliers
     # print(outlier_val[0,51,22,0], shared_exp_out[0,51,22,0])
-    outlier_val = outlier_val / (2**shared_exp_out)
+    # outlier_val = outlier_val / (2**shared_exp_out)
     # print(outlier_val[0,51,22,0])
     # print(list(zip(*torch.where(torch.isnan(outlier_val)))))
-    assert not torch.isnan(outlier_val).any(), "outlier_val contains NaN values"
+    # assert not torch.isnan(outlier_val).any(), "outlier_val contains NaN values"
     # Quantize outliers
-    outlier_val = _quantize_elemwise_core(
-                outlier_val, mbits_out, ebits_out, max_norm_out, round=round,
-                allow_denorm=True, saturate_normals=True,
-                custom_cuda=custom_cuda)
+    # outlier_val = _quantize_elemwise_core(
+                # outlier_val, mbits_out, ebits_out, max_norm_out, round=round,
+                # allow_denorm=True, saturate_normals=True,
+                # custom_cuda=custom_cuda)
     
     # Dequantize outliers using level-1 and level-2 scale factors
-    outlier_val = (outlier_val * (2**shared_exp_out))/ (2**shared_exp_in)
+    # outlier_val = (outlier_val * (2**shared_exp_out))/ (2**shared_exp_in)
     #*****************************************************
 
     # Reconstruct A
-    A = inlier_val + outlier_val
+    A = inlier_val #+ outlier_val
     # print(A.size())
     # Undo tile reshaping
     if block_size:
         A = _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
 
-    return A, num_outliers
+    return A, int('0') # num_outliers
 def quantize_mx_outlier_v1(
     A,
     inlier_scale_bits,

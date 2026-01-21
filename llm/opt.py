@@ -90,7 +90,7 @@ def opt_sequential(model, dataloader, dev):
                 inlier_elem_format = 'int4',
                 outlier_elem_format = 'int4',
                 axes = [0],
-                block_size=16
+                block_size=32
             )
 
         def add_batch(name):

@@ -62,6 +62,8 @@ class GPTQ:
     ):
         # 打印N:M
         print(f"Applying {prunen}:{prunem} pruning during quantization.")
+        # 打印groupsize
+        print(f"Using groupsize of {groupsize} for quantization.")
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
