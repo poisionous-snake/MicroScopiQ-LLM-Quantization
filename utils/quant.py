@@ -96,7 +96,7 @@ def quantize_mx_outlier_hessian(
     # Scale inlier values
     inlier_val = inlier_val / (2**shared_exp_in)
     # Level-1 scaling of outliers
-    outlier_val = outlier_val * (2**shared_exp_in)
+    # outlier_val = outlier_val * (2**shared_exp_in)
     # Quantize inliers MX标准舍入
     inlier_val = _quantize_elemwise_core(
                 inlier_val, mbits_in, ebits_in, max_norm_in, round=round,
@@ -106,7 +106,7 @@ def quantize_mx_outlier_hessian(
     # Dequantize inliers
     inlier_val = inlier_val * (2**shared_exp_in)
     assert not torch.isnan(inlier_val).any(), "inlier_val contains NaN values"
-    assert not torch.isnan(outlier_val).any(), "outlier_val 1 contains NaN values"
+    # assert not torch.isnan(outlier_val).any(), "outlier_val 1 contains NaN values"
     #*****************************************************
     # Get shared exponents for outliers
     # shared_exp_out = _shared_exponents(
