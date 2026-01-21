@@ -51,16 +51,16 @@ def quantize_mx_outlier_hessian(
     # Get parameters of the inlier and outlier formats
     ebits_in, mbits_in, emax_in, max_norm_in, _ = _get_format_params(inlier_elem_format)
     # 打印inliner_elem_format参数
-    print("Inlier Format Params:", inlier_elem_format, ebits_in, mbits_in, emax_in, max_norm_in)
+    # print("Inlier Format Params:", inlier_elem_format, ebits_in, mbits_in, emax_in, max_norm_in)
     ebits_out, mbits_out, emax_out, max_norm_out, _ = _get_format_params(outlier_elem_format)
 
     # Perform tiling to the hardware vector size
     if block_size > 0:
-        print(f"axes: {axes}, block_size: {block_size}")
+        # print(f"axes: {axes}, block_size: {block_size}")
         A, axes, orig_shape, padded_shape = _reshape_to_blocks(
             A, axes, block_size
         ) # TODO：
-        print(f"axes: {axes}, block_size: {block_size}, orig_shape: {orig_shape}, padded_shape: {padded_shape}")
+        # print(f"axes: {axes}, block_size: {block_size}, orig_shape: {orig_shape}, padded_shape: {padded_shape}")
     
     # Estimate axis to calculate shared exponent
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
@@ -88,7 +88,7 @@ def quantize_mx_outlier_hessian(
 
     shared_exp_in = shared_exp_in - emax_in
     scale_emax_in = 2**(inlier_scale_bits-1) - 1 # 2**(8-1) - 1 
-    print("shared_exp_in: ", shared_exp_in)
+    # print("shared_exp_in: ", shared_exp_in)
 
     shared_exp_in[shared_exp_in > scale_emax_in] = float("NaN")
     shared_exp_in[shared_exp_in < -scale_emax_in] = -20 if (-scale_emax_in < -20) else -scale_emax_in
