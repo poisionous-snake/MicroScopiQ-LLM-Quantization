@@ -87,10 +87,10 @@ def opt_sequential(model, dataloader, dev):
             gptq[name].quantizer.configure(
                 inlier_scale_bits = 8,
                 outlier_scale_bits = 8,
-                inlier_elem_format = 'fp4',
-                outlier_elem_format = 'fp4',
+                inlier_elem_format = args.inlier_elem_format,
+                outlier_elem_format = args.outlier_elem_format,
                 axes = [0],
-                block_size=32
+                block_size=args.blocksize
             )
 
         def add_batch(name):
@@ -194,10 +194,10 @@ def opt_eval(model, testenc, dev):
                 quantizer.configure(
                 inlier_scale_bits = 8,
                 outlier_scale_bits = 8,
-                inlier_elem_format = 'fp4',
-                outlier_elem_format = 'fp4',
+                inlier_elem_format = args.inlier_elem_format,
+                outlier_elem_format = args.outlier_elem_format,
                 axes=[0],
-                block_size=16
+                block_size=args.blocksize
                 )
                 W = subset[name].weight.data
                 quantizer.find_params(W, weight=True)
@@ -247,7 +247,7 @@ def opt_eval(model, testenc, dev):
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(ppl.item())
+    print(f"PPL: {ppl.item()}")
 
     model.config.use_cache = use_cache
 
@@ -456,7 +456,6 @@ if __name__ == '__main__':
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
-
     parser.add_argument(
         '--use-mx', action='store_true',
         help='Whether to use MX Quantizer Class or Not'
@@ -469,7 +468,18 @@ if __name__ == '__main__':
         '--prunem', type=int, default=0,
         help='M for N:M pruning.'
     )
-
+    parser.add_argument(
+        '--blocksize', type=int, default=32,
+        help='Blocksize to use for MX Quantization.'
+    )
+    parser.add_argument(
+        '--inlier-elem-format', type=str, default='fp4',
+        help='Element format for inliers (e.g., fp4, fp8, int4).'
+    )
+    parser.add_argument(
+        '--outlier-elem-format', type=str, default='fp4',
+        help='Element format for outliers (e.g., fp4, fp8, int4).'
+    )
     args = parser.parse_args()
 
     if args.load:

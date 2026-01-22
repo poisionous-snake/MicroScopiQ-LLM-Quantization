@@ -61,14 +61,16 @@ class GPTQ:
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0
     ):
         # 打印N:M
-        print(f"Applying {prunen}:{prunem} pruning during quantization.")
+        # print(f"Applying {prunen}:{prunem} pruning during quantization.")
         # 打印groupsize
-        print(f"Using groupsize of {groupsize} for quantization.")
+        print(f"Using blocksize of {blocksize} for quantization.")
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
+            print("Conv2d")
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
+            print("Conv1d")
         W = W.float()
 
         tick = time.time()
@@ -133,6 +135,7 @@ class GPTQ:
                         self.quantizer = groups[idx // groupsize]
                 
                 if prunen != 0 and i % prunem == 0:
+                    print(f"Applying {prunen}:{prunem} pruning during quantization.")
                     if i + prunem <= count:
                         w_group = W1[:, i:(i + prunem)].clone()
                     
