@@ -27,29 +27,53 @@ GLOBAL_SCALE_STATS = collections.Counter()
 
 def plot_global_stats(save_name="global_scale_distribution.png"):
     """
-    Plot the data in GLOBAL_SCALE_STATS as a histogram
+    Plot the data in GLOBAL_SCALE_STATS as a histogram.
+    Features:
+    1. Skips gaps (x-axis is categorical).
+    2. Annotates counts on top of bars.
     """
     if not GLOBAL_SCALE_STATS:
         print("[Warning] GLOBAL_SCALE_STATS is null, no data to plot.")
         return
 
-    # Extract data and sort
+    # 1. 提取数据并排序
+    # Counter 中的 key 本身就是非零的（除非你手动设为0），这里排序是为了横轴有序
     sorted_keys = sorted(GLOBAL_SCALE_STATS.keys())
     values = [GLOBAL_SCALE_STATS[k] for k in sorted_keys]
     
-    # Start plotting
-    plt.figure(figsize=(12, 6))
-    
-    # Use bar chart
-    plt.bar(sorted_keys, values, color='skyblue', edgecolor='black', alpha=0.7, width=0.8)
-    
-    plt.yscale('log') # Enable logarithmic scale
-    
-    plt.title("Global Scale Exponent Distribution (All Layers Accumulation)")
-    plt.xlabel("Exponent Value (Scale = 2^x)")
-    plt.ylabel("Total Count (Log Scale)")
-    plt.grid(True, which="both", ls="--", alpha=0.5)
+    # 2. 生成离散的 X 轴坐标 (0, 1, 2, ...)
+    # 这样做的目的是让柱子紧挨着，视觉上忽略掉中间不存在的数值区间
+    x_positions = range(len(sorted_keys))
 
+    # 开始绘图
+    plt.figure(figsize=(14, 7)) #稍微加宽一点，防止标签拥挤
+    
+    # 3. 绘制柱状图 (注意 x 参数传的是 x_positions)
+    bars = plt.bar(x_positions, values, color='skyblue', edgecolor='black', alpha=0.7, width=0.8)
+    
+    plt.yscale('log') # 保持对数坐标
+    
+    # 4. 在每个柱子上方添加数值标签
+    for rect, val in zip(bars, values):
+        height = rect.get_height()
+        # 在对数坐标下，位置稍微乘一点系数以浮在柱子上方
+        plt.text(
+            rect.get_x() + rect.get_width() / 2.0, 
+            height * 1.1,  # 放在高度的 1.1 倍处 (log坐标下加法不明显，用乘法)
+            f'{val}', 
+            ha='center', va='bottom', fontsize=9
+        )
+
+    # 5. 修正 X 轴刻度标签
+    # 将离散坐标 (0, 1, 2...) 替换回真实的指数值 (sorted_keys)
+    plt.xticks(x_positions, sorted_keys, rotation=45 if len(sorted_keys) > 20 else 0)
+
+    plt.title("Global Scale Exponent Distribution (Discrete View)")
+    plt.xlabel("Exponent Value (Scale = 2^x) [Zero-count intervals omitted]")
+    plt.ylabel("Total Count (Log Scale)")
+    plt.grid(True, which="major", axis="y", ls="--", alpha=0.5) # 只画Y轴网格，X轴间断了画网格会乱
+
+    plt.tight_layout() # 防止标签被切掉
     plt.savefig(save_name)
     print(f"\n[Success] 全局统计图已保存至: {save_name}")
 
