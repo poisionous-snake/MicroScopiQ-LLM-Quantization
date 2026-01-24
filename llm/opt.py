@@ -8,6 +8,7 @@ sys.path.append("../")
 from gptq import *
 from utils.modelutils import *
 from utils.quant import *
+from utils.quant import plot_global_stats
 
 
 def get_opt(model):
@@ -497,6 +498,10 @@ if __name__ == '__main__':
         tick = time.time()
         quantizers = opt_sequential(model, dataloader, DEV)
         print(time.time() - tick)
+        # plot 
+        print(f"GPTQ 量化完成，正在生成 Scale 分布图...")
+        plot_name = f"scale_dist_gptq_{args.model.split('/')[-1]}_w{args.wbits}.png"
+        plot_global_stats(save_name=plot_name)
 
     if args.benchmark:
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]

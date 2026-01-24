@@ -20,6 +20,11 @@ from mx.elemwise_ops import (
 
 from mx.specs import finalize_mx_specs
 
+import collections
+import matplotlib.pyplot as plt
+ 
+GLOBAL_SCALE_STATS = collections.Counter()
+
 def quantize_mx_outlier_hessian(
     A,
     inlier_scale_bits,
@@ -87,6 +92,16 @@ def quantize_mx_outlier_hessian(
     # in the element data format
 
     shared_exp_in = shared_exp_in - emax_in
+
+    # Accumulate global scale statistics
+    unique_vals, counts = torch.unique(shared_exp_in, return_counts=True)
+
+    unique_vals_cpu = unique_vals.detach().cpu().numpy().astype(int)
+    counts_cpu = counts.detach().cpu().numpy().astype(int)
+
+    for val, count in zip(unique_vals_cpu, counts_cpu):
+        GLOBAL_SCALE_STATS[val] += count  
+
     scale_emax_in = 2**(inlier_scale_bits-1) - 1 # 2**(8-1) - 1 
     # print("shared_exp_in: ", shared_exp_in)
 
