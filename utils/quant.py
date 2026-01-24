@@ -25,6 +25,37 @@ import matplotlib.pyplot as plt
  
 GLOBAL_SCALE_STATS = collections.Counter()
 
+def plot_global_stats(save_name="global_scale_distribution.png"):
+    """
+    Plot the data in GLOBAL_SCALE_STATS as a histogram
+    """
+    if not GLOBAL_SCALE_STATS:
+        print("[Warning] GLOBAL_SCALE_STATS is null, no data to plot.")
+        return
+
+    # Extract data and sort
+    sorted_keys = sorted(GLOBAL_SCALE_STATS.keys())
+    values = [GLOBAL_SCALE_STATS[k] for k in sorted_keys]
+    
+    # Start plotting
+    plt.figure(figsize=(12, 6))
+    
+    # Use bar chart
+    plt.bar(sorted_keys, values, color='skyblue', edgecolor='black', alpha=0.7, width=0.8)
+    
+    plt.yscale('log') # Enable logarithmic scale
+    
+    plt.title("Global Scale Exponent Distribution (All Layers Accumulation)")
+    plt.xlabel("Exponent Value (Scale = 2^x)")
+    plt.ylabel("Total Count (Log Scale)")
+    plt.grid(True, which="both", ls="--", alpha=0.5)
+
+    plt.savefig(save_name)
+    print(f"\n[Success] 全局统计图已保存至: {save_name}")
+
+    GLOBAL_SCALE_STATS.clear()
+    plt.close()
+
 def quantize_mx_outlier_hessian(
     A,
     inlier_scale_bits,
