@@ -121,6 +121,7 @@ class GPTQ:
             Hinv1 = Hinv[i1:i2, i1:i2]
             # print("HINV Shape", W.shape, W1.shape, Hinv.shape, Hinv1.shape)
             mask_buffer = None
+            mean_buffer = None
             for i in range(count):
                 w = W1[:, i]
                 d = Hinv1[i, i]
@@ -147,8 +148,18 @@ class GPTQ:
                         _, indices_to_prune = torch.topk(scores, k=prunen, dim=1, largest=False)
                         mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
                         mask_buffer.scatter_(dim=1, index=indices_to_prune, value=False)
+
+                        with torch.no_grad():
+                            # case1: mean of kept weights
+                            kept_sum = (w_group * mask_buffer).sum(dim=1, keepdim=True) 
+                            mean_buffer = kept_sum / (prunem - prunen) 
+
+                            # case2: mean of original weights
+                            # kept_sum = w_group.sum(dim=1, keepdim=True) 
+                            # mean_buffer = kept_sum / prunem
                     else:
                         mask_buffer = None
+                        mean_buffer = None
                 
                 q, num_outliers_per_block = quantize_mx_outlier_hessian(
                     w.unsqueeze(1),
@@ -168,7 +179,9 @@ class GPTQ:
 
                 if mask_buffer is not None:
                     col_mask = mask_buffer[:, i % prunem]
-                    q = q * col_mask
+                    col_mean = mean_buffer
+                    # q = q * col_mask
+                    q = torch.where(col_mask, q, col_mean)
                 # print(q.shape)
                 # importance = (q ** 2) / d ** 2
                 # num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
