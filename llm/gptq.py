@@ -155,8 +155,12 @@ class GPTQ:
                             # mean_buffer = kept_sum / (prunem - prunen) 
 
                             # case2: mean of original weights
-                            kept_sum = w_group.sum(dim=1) 
-                            mean_buffer = kept_sum / prunem
+                            # kept_sum = w_group.sum(dim=1) 
+                            # mean_buffer = kept_sum / prunem
+
+                            # case3: mean of pruned weights
+                            pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
+                            mean_buffer = pruned_sum / prunen
                     else:
                         mask_buffer = None
                         mean_buffer = None
