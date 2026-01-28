@@ -151,12 +151,12 @@ class GPTQ:
 
                         with torch.no_grad():
                             # case1: mean of kept weights
-                            kept_sum = (w_group * mask_buffer).sum(dim=1) 
-                            mean_buffer = kept_sum / (prunem - prunen) 
+                            # kept_sum = (w_group * mask_buffer).sum(dim=1) 
+                            # mean_buffer = kept_sum / (prunem - prunen) 
 
                             # case2: mean of original weights
-                            # kept_sum = w_group.sum(dim=1) 
-                            # mean_buffer = kept_sum / prunem
+                            kept_sum = w_group.sum(dim=1) 
+                            mean_buffer = kept_sum / prunem
                     else:
                         mask_buffer = None
                         mean_buffer = None
