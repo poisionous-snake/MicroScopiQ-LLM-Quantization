@@ -161,12 +161,25 @@ class GPTQ:
                             # case3: mean of pruned weights
                             pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
                             mean_buffer = pruned_sum / prunen
+
+                            #case4: zero compensation
+                            # mean_buffer = torch.zeros_like(w)
                     else:
                         mask_buffer = None
                         mean_buffer = None
                 
+                # If pruning mask exists, replace pruned entries in `w` with the
+                # compensation mean before quantizing so quantization operates on
+                # the pruned-compensated weight vector.
+                if mask_buffer is not None:
+                    col_mask = mask_buffer[:, i % prunem]
+                    col_mean = mean_buffer
+                    w_to_quant = torch.where(col_mask, w, col_mean)
+                else:
+                    w_to_quant = w
+
                 q, num_outliers_per_block = quantize_mx_outlier_hessian(
-                    w.unsqueeze(1),
+                    w_to_quant.unsqueeze(1),
                     self.quantizer.inlier_scale_bits,
                     self.quantizer.outlier_scale_bits,
                     self.quantizer.inlier_elem_format,    # can be None for no quantization
@@ -181,11 +194,12 @@ class GPTQ:
                 )
                 q = q.flatten()
 
-                if mask_buffer is not None:
-                    col_mask = mask_buffer[:, i % prunem]
-                    col_mean = mean_buffer
-                    # q = q * col_mask
-                    q = torch.where(col_mask, q, col_mean)
+                # if mask_buffer is not None:
+                #     col_mask = mask_buffer[:, i % prunem]
+                #     col_mean = mean_buffer
+                #     # q = q * col_mask
+                #     q = torch.where(col_mask, q, col_mean)
+
                 # print(q.shape)
                 # importance = (q ** 2) / d ** 2
                 # num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
