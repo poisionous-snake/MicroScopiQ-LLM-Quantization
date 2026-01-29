@@ -9,6 +9,17 @@ from gptq import *
 from utils.modelutils import *
 from utils.quant import *
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_weight_heatmap(weight, title, save_name):
+    plt.figure(figsize=(10, 8))
+    # 将权重转为 CPU 并转为 numpy，取前 128x128 的子集进行可视化，避免大矩阵渲染过慢
+    data = weight[:128, :128].detach().cpu().float().numpy()
+    sns.heatmap(data, cmap='viridis', center=0)
+    plt.title(title)
+    plt.show()
+    plt.savefig(save_name) # 如果需要保存
 
 def get_opt(model):
     import torch
@@ -102,11 +113,20 @@ def opt_sequential(model, dataloader, dev):
             h.remove()
 
         for name in subset:
+            if i == 0: # 仅针对第一层
+                print(f"Visualizing {name} before pruning...")
+                plot_weight_heatmap(subset[name].weight, f"{name} - Before Pruning", f"{name}_pre.png")
+
             print(i, name)
             print('Quantizing ...')
             gptq[name].fasterquant(
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem
             )
+
+            if i == 0: # 仅针对第一层
+                print(f"Visualizing {name} after pruning/quant...")
+                plot_weight_heatmap(subset[name].weight, f"{name} - After Pruning", f"{name}_post.png")
+
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
         for j in range(args.nsamples):
