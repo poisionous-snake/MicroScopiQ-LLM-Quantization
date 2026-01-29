@@ -13,13 +13,31 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def plot_weight_heatmap(weight, title, save_name):
-    plt.figure(figsize=(10, 8))
-    # 将权重转为 CPU 并转为 numpy，取前 128x128 的子集进行可视化，避免大矩阵渲染过慢
+    # 1. 调整数据：取子集并转为 float
     data = weight[:128, :128].detach().cpu().float().numpy()
-    sns.heatmap(data, cmap='viridis', center=0)
+    
+    # 2. 解决“全白”：计算 98% 分位数，过滤掉极个别的大值
+    # 如果不设置这个，只要有一个权重特别大，其他权重在视觉上都会变成接近 0 的颜色（白色）
+    v_limit = np.percentile(np.abs(data), 98)
+    if v_limit == 0: v_limit = 0.1 # 防错处理
+
+    plt.figure(figsize=(10, 8))
+    
+    # 3. 绘制热图
+    # cmap='RdBu_r': 红色正值，蓝色负值，剪枝掉的 0 会显示为中间的白色
+    # center=0: 确保 0 轴对齐
+    # vmin/vmax: 强行锁定显示范围，让大部分权重颜色丰富起来
+    sns.heatmap(data, cmap='RdBu_r', center=0, vmin=-v_limit, vmax=v_limit)
+    
     plt.title(title)
+    
+    # 4. 【关键修改】：必须先 savefig，再 show
+    # plt.show() 之后画布会被清空，导致后续保存的文件变白/变空
+    plt.savefig(save_name, bbox_inches='tight')
+    print(f"Heatmap saved as {save_name}")
+    
     plt.show()
-    plt.savefig(save_name) # 如果需要保存
+    plt.close() # 显式关闭，防止内存泄漏
 
 def get_opt(model):
     import torch
