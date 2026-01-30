@@ -7,7 +7,7 @@ import transformers
 import sys
 sys.path.append("../")
 from utils.quant import *
-
+from opt import plot_weight_heatmap
 
 DEBUG = False 
 
@@ -58,7 +58,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
     ):
         # 打印N:M
         if prunen != 0:
@@ -162,7 +162,10 @@ class GPTQ:
                             pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
                             mean_buffer = pruned_sum / prunen
 
-                            #case4: zero compensation
+                            if i1 == 0 and i == 0 and plot:
+                                plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", "pruned_weights_block_0.png")
+
+                            # case4: zero compensation
                             # mean_buffer = torch.zeros_like(w)
                     else:
                         mask_buffer = None
@@ -185,6 +188,9 @@ class GPTQ:
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
+
+            if i1 == 0 and plot:
+                plot_weight_heatmap(Q1 * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", "quantized_weights_block_0.png")
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
