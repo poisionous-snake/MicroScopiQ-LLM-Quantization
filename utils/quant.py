@@ -1,6 +1,23 @@
 import torch
 import torch.nn as nn
 
+def apply_mxfp4_mapping(x_norm):
+    values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x_norm.device)
+    sign = torch.sign(x_norm)
+    abs_x = torch.abs(x_norm)
+
+    # round to nearest
+    midpoints = (values[:-1] + values[1:]) / 2
+    indices = torch.bucketize(abs_x, midpoints)
+    assert indices.max() < len(values)
+
+    return values[indices] * sign
+
+def quantize(x, scale):
+    x_norm = x / scale
+    x_q = apply_mxfp4_mapping(x_norm)
+    return x_q * scale
+
 class Quantizer(nn.Module):
     def __init__(self, shape=1):
         super(Quantizer, self).__init__()
@@ -17,23 +34,9 @@ class Quantizer(nn.Module):
         exponents = torch.clamp(exponents, min=-(2**7), max=2**7-1)
         self.scale = torch.pow(2.0, exponents)
 
-    def apply_mxfp4_mapping(self, x_norm):
-        values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x_norm.device)
-        sign = torch.sign(x_norm)
-        abs_x = torch.abs(x_norm)
-
-        # round to nearest
-        midpoints = (values[:-1] + values[1:]) / 2
-        indices = torch.bucketize(abs_x, midpoints)
-        assert indices.max() < len(values)
-
-        return values[indices] * sign
-
     def quantize(self, x):
         if self.ready():
-            x_norm = x / self.scale
-            x_q = self.apply_mxfp4_mapping(x_norm)
-            return x_q * self.scale
+            return quantize(x, self.scale)
         return x
 
     def ready(self):
