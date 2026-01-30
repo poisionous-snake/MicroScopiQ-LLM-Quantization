@@ -13,31 +13,46 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def plot_weight_heatmap(weight, title, save_name):
-    # 1. 调整数据：取子集并转为 float
-    data = weight[:128, :128].detach().cpu().float().numpy()
+    # 1. 采样范围设定为 32x32
+    sample_size = 32
+    data = weight[:sample_size, :sample_size].detach().cpu().float().numpy()
     
-    # 2. 解决“全白”：计算 98% 分位数，过滤掉极个别的大值
-    # 如果不设置这个，只要有一个权重特别大，其他权重在视觉上都会变成接近 0 的颜色（白色）
+    # 2. 动态值域计算 (解决全白问题)
     v_limit = np.percentile(np.abs(data), 98)
-    if v_limit == 0: v_limit = 0.1 # 防错处理
+    if v_limit == 0: v_limit = 0.1
 
-    plt.figure(figsize=(10, 8))
+    # 3. 创建画布：PDF 格式下适当增加尺寸以保证数值清晰
+    plt.figure(figsize=(20, 16))
     
-    # 3. 绘制热图
-    # cmap='RdBu_r': 红色正值，蓝色负值，剪枝掉的 0 会显示为中间的白色
-    # center=0: 确保 0 轴对齐
-    # vmin/vmax: 强行锁定显示范围，让大部分权重颜色丰富起来
-    sns.heatmap(data, cmap='RdBu_r', center=0, vmin=-v_limit, vmax=v_limit)
+    # 4. 绘制热图
+    # annot=True: 显示数值
+    # fmt=".2f": 保留两位小数
+    # annot_kws={"size": 7}: 32x32 规模下，字号 7 比较合适
+    sns.heatmap(
+        data, 
+        annot=True, 
+        fmt=".5f", 
+        annot_kws={"size": 7}, 
+        cmap='RdBu_r', 
+        center=0, 
+        vmin=-v_limit, 
+        vmax=v_limit,
+        cbar_kws={'label': 'Weight Value'}
+    )
     
-    plt.title(title)
+    plt.title(f"{title} (32x32 Subset)", fontsize=16)
     
-    # 4. 【关键修改】：必须先 savefig，再 show
-    # plt.show() 之后画布会被清空，导致后续保存的文件变白/变空
-    plt.savefig(save_name, bbox_inches='tight')
-    print(f"Heatmap saved as {save_name}")
+    # 5. 保存为 PDF
+    # 确保文件名后缀是 .pdf
+    if not save_name.lower().endswith('.pdf'):
+        save_name = save_name.rsplit('.', 1)[0] + '.pdf'
+        
+    plt.savefig(save_name, format='pdf', bbox_inches='tight')
+    print(f"Heatmap saved as PDF: {save_name}")
     
+    # 6. 先 Save 后 Show 避免空白
     plt.show()
-    plt.close() # 显式关闭，防止内存泄漏
+    plt.close()
 
 def get_opt(model):
     import torch
