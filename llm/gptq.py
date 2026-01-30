@@ -178,38 +178,9 @@ class GPTQ:
                 else:
                     w_to_quant = w
 
-                q, num_outliers_per_block = quantize_mx_outlier_hessian(
-                    w_to_quant.unsqueeze(1),
-                    self.quantizer.inlier_scale_bits,
-                    self.quantizer.outlier_scale_bits,
-                    self.quantizer.inlier_elem_format,    # can be None for no quantization
-                    self.quantizer.outlier_elem_format,    # can be None for no quantization
-                    self.quantizer.shared_exp_method,
-                    float('inf'),     # guarantee there is no outlier, mx only
-                    self.quantizer.axes,
-                    self.quantizer.block_size,
-                    self.quantizer.round,
-                    self.quantizer.flush_fp32_subnorms,
-                    self.quantizer.custom_cuda
-                )
-                q = q.flatten()
-
-                # if mask_buffer is not None:
-                #     col_mask = mask_buffer[:, i % prunem]
-                #     col_mean = mean_buffer
-                #     # q = q * col_mask
-                #     q = torch.where(col_mask, q, col_mean)
-
-                # print(q.shape)
-                # importance = (q ** 2) / d ** 2
-                # num_outliers = (num_outliers_per_block.sum()).to(torch.int16)
-                # # print(num_outliers)
-                # # Find the indices of the 10 least important weights
-                # least_important_indices = torch.topk(importance, num_outliers, largest=False).indices
-                
-                # # Set the 10 least important weights in q to 0
-                # q[least_important_indices] = 0
-
+                q = quantize(
+                    w_to_quant.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
+                ).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
