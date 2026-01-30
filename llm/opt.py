@@ -22,7 +22,7 @@ def plot_weight_heatmap(weight, title, save_name):
     if v_limit == 0: v_limit = 0.1
 
     # 3. 创建画布：PDF 格式下适当增加尺寸以保证数值清晰
-    plt.figure(figsize=(20, 16))
+    plt.figure(figsize=(25, 20))
     
     # 4. 绘制热图
     # annot=True: 显示数值
