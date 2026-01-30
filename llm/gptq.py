@@ -77,7 +77,7 @@ class GPTQ:
         tick = time.time()
 
         if not self.quantizer.ready():
-            self.quantizer.find_params(W, weight=True)
+            self.quantizer.find_params(W)
 
         H = self.H
         del self.H
@@ -90,7 +90,7 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i:(i + groupsize)], weight=True)
+                quantizer.find_params(W[:, i:(i + groupsize)])
                 groups.append(quantizer)
 
         if actorder:
@@ -129,7 +129,7 @@ class GPTQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)], weight=True)
+                            self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)])
                     else:
                         idx = i1 + i
                         if actorder:
@@ -178,9 +178,7 @@ class GPTQ:
                 else:
                     w_to_quant = w
 
-                q = quantize(
-                    w_to_quant.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
-                ).flatten()
+                q = quantize(w_to_quant.unsqueeze(1)).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 

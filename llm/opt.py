@@ -83,14 +83,10 @@ def opt_sequential(model, dataloader, dev):
         gptq = {}
         for name in subset:
             gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = MXQuantizer() if args.use_mx else Quantizer()
+            gptq[name].quantizer = Quantizer()
             gptq[name].quantizer.configure(
-                inlier_scale_bits = 8,
-                outlier_scale_bits = 8,
-                inlier_elem_format = args.inlier_elem_format,
-                outlier_elem_format = args.outlier_elem_format,
-                axes = [0],
-                block_size=args.blocksize
+                bits=args.wbits,
+                groupsize=args.groupsize
             )
 
         def add_batch(name):
@@ -185,36 +181,6 @@ def opt_eval(model, testenc, dev):
     for i in range(len(layers)):
         print(i)
         layer = layers[i].to(dev)
-
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = MXQuantizer() if args.use_mx else Quantizer()
-                
-                quantizer.configure(
-                inlier_scale_bits = 8,
-                outlier_scale_bits = 8,
-                inlier_elem_format = args.inlier_elem_format,
-                outlier_elem_format = args.outlier_elem_format,
-                axes=[0],
-                block_size=args.blocksize
-                )
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize_mx_outlier_v1(
-                    W,
-                    quantizer.inlier_scale_bits,
-                    quantizer.outlier_scale_bits,
-                    quantizer.inlier_elem_format,    # can be None for no quantization
-                    quantizer.outlier_elem_format,    # can be None for no quantization
-                    quantizer.shared_exp_method,
-                    quantizer.std_dev,
-                    quantizer.axes,
-                    quantizer.block_size,
-                    quantizer.round,
-                    quantizer.flush_fp32_subnorms,
-                    quantizer.custom_cuda
-                ).to(next(iter(layer.parameters())).dtype)
 
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
@@ -455,10 +421,6 @@ if __name__ == '__main__':
     parser.add_argument(
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
-    )
-    parser.add_argument(
-        '--use-mx', action='store_true',
-        help='Whether to use MX Quantizer Class or Not'
     )
     parser.add_argument(
         '--prunen', type=int, default=0,
