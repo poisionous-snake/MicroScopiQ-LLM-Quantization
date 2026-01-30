@@ -164,6 +164,7 @@ class GPTQ:
 
                             if i1 == 0 and i == 0 and plot:
                                 plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", "pruned_weights_block_0.png")
+                                plot_weight_heatmap(mask_buffer, f"Pruning Mask at Block {i}", "pruning_mask_block_0.png")
 
                             # case4: zero compensation
                             # mean_buffer = torch.zeros_like(w)
