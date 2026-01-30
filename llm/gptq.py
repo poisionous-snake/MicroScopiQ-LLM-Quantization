@@ -178,7 +178,7 @@ class GPTQ:
                 else:
                     w_to_quant = w
 
-                q = quantize(w_to_quant.unsqueeze(1)).flatten()
+                q = quantize(w_to_quant.unsqueeze(1), self.quantizer.scale).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
