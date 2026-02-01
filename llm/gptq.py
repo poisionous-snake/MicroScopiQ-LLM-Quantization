@@ -58,7 +58,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False, name=""
     ):
         # 打印N:M
         if prunen != 0:
@@ -163,8 +163,8 @@ class GPTQ:
                             mean_buffer = pruned_sum / prunen
 
                             if i1 == 0 and i == 0 and plot:
-                                plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", "pruned_weights_block_0.png")
-                                plot_weight_heatmap(mask_buffer, f"Pruning Mask at Block {i}", "pruning_mask_block_0.png")
+                                plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", f"pruned_weights_{name}_block_0.png")
+                                plot_weight_heatmap(mask_buffer, f"Pruning Mask at Block {i}", f"pruning_mask_{name}_block_0.png")
 
                             # case4: zero compensation
                             # mean_buffer = torch.zeros_like(w)
@@ -190,8 +190,8 @@ class GPTQ:
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
-            if i1 == 0 and plot:
-                plot_weight_heatmap(Q1 * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", "quantized_weights_block_0.png")
+                if i1 == 0 and i == prunem - 1 and plot and mask_buffer is not None:
+                    plot_weight_heatmap(Q1[:, :prunem] * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", f"quantized_weights_{name}_block_0.png")
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2

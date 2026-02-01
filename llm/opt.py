@@ -11,11 +11,12 @@ from utils.quant import *
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 def plot_weight_heatmap(weight, title, save_name):
     # 1. 采样范围设定为 32x32
-    sample_size = 32
-    data = weight[:sample_size, :sample_size].detach().cpu().float().numpy()
+    sample_size = min(32, weight.shape[1])
+    data = weight[:32, :sample_size].detach().cpu().float().numpy()
     
     # 2. 动态值域计算 (解决全白问题)
     v_limit = np.percentile(np.abs(data), 98)
@@ -153,7 +154,7 @@ def opt_sequential(model, dataloader, dev):
             print(i, name)
             print('Quantizing ...')
             gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem
+                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem, plot=(i==0), name=name
             )
 
             if i == 0: # 仅针对第一层
