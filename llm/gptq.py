@@ -110,6 +110,9 @@ class GPTQ:
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
 
+        mask = torch.ones_like(W, dtype=torch.bool)
+        mean_comp = torch.zeros((W.shape[0],), device=self.dev)
+
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
@@ -136,49 +139,33 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
                 
-                if prunen != 0 and i % prunem == 0:
-                    if i + prunem <= count:
-                        w_group = W1[:, i:(i + prunem)].clone()
+                if prunen != 0 and (i1 + i) % prunem == 0:
+                    window_start = i1 + i
+                    window_end = min(window_start + prunem, self.columns)
                     
-                        # scores = w_group.abs()
+                    # pre-quant to calculate score
+                    w_window = W[:, window_start:window_end]
+                    q_window = quantize(w_window, self.quantizer.scale)
 
-                        diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + prunem)], device=self.dev)
-                        scores = (w_group ** 2) / (diag_group ** 2)
-                        
-                        _, indices_to_prune = torch.topk(scores, k=prunen, dim=1, largest=False)
-                        mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
-                        mask_buffer.scatter_(dim=1, index=indices_to_prune, value=False)
+                    # calculate scores
+                    d_window = torch.diag(Hinv1)[i:(i + prunem)].reshape((1, -1))
+                    scores = q_window ** 2 / d_window ** 2
 
-                        with torch.no_grad():
-                            # case1: mean of kept weights
-                            # kept_sum = (w_group * mask_buffer).sum(dim=1) 
-                            # mean_buffer = kept_sum / (prunem - prunen) 
+                    # select indices to prune
+                    _, indices = torch.topk(scores, k=prunen, dim=1, largest=False)
+                    window_mask = torch.ones_like(q_window, dtype=torch.bool)
+                    window_mask.scatter_(dim=1, index=indices, value=False)
+                    mask[:, window_start:window_end] = window_mask
 
-                            # case2: mean of original weights
-                            # kept_sum = w_group.sum(dim=1) 
-                            # mean_buffer = kept_sum / prunem
+                    # compute mean compensation
+                    pruned_values = q_window * (~window_mask)
+                    mean_comp = pruned_values.sum(dim=1) / max(prunen, 1)
 
-                            # case3: mean of pruned weights
-                            pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
-                            mean_buffer = pruned_sum / prunen
+                q = quantize(w.unsqueeze(1), self.quantizer.scale).flatten()
 
-                            #case4: zero compensation
-                            # mean_buffer = torch.zeros_like(w)
-                    else:
-                        mask_buffer = None
-                        mean_buffer = None
-                
-                # If pruning mask exists, replace pruned entries in `w` with the
-                # compensation mean before quantizing so quantization operates on
-                # the pruned-compensated weight vector.
-                if mask_buffer is not None:
-                    col_mask = mask_buffer[:, i % prunem]
-                    col_mean = mean_buffer
-                    w_to_quant = torch.where(col_mask, w, col_mean)
-                else:
-                    w_to_quant = w
+                current_col_mask = mask[:, i1 + i]
+                q = torch.where(current_col_mask, q, mean_comp)
 
-                q = quantize(w_to_quant.unsqueeze(1), self.quantizer.scale).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
