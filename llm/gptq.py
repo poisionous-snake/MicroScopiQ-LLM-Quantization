@@ -68,6 +68,9 @@ def plot_fp4_mantissa_heatmap(Wq, title, filename):
         filename
     )
 
+def fp4_bits_to_str(sign, exp, man):
+    return f"{sign}-{exp:02b}-{man}"
+
 class GPTQ:
 
     def __init__(self, layer):
@@ -246,8 +249,25 @@ class GPTQ:
 
                 if i1 == 0 and i == prunem - 1 and plot and mask_buffer is not None:
                     # plot_weight_heatmap(Q1[:, :prunem] * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", f"quantized_weights_{name}_block_0.png")
-                    plot_fp4_mantissa_heatmap((Q1[:, :prunem] * (~mask_buffer)) / self.quantizer.scale, f"FP4 Mantissa at Block {i}", f"fp4_mantissa_{name}_block_0.png")
+                    # plot_fp4_mantissa_heatmap((Q1[:, :prunem] * (~mask_buffer)) / self.quantizer.scale, f"FP4 Mantissa at Block {i}", f"fp4_mantissa_{name}_block_0.png")
 
+                    fp4_vals = (Q1[:, :prunem] * (~mask_buffer)) / self.quantizer.scale
+
+                    s, e, m = fp4_e2m1_decompose(fp4_vals)
+
+                    print(f"\n[FP4 bits at block {i} | layer {name}]")
+
+                    rows, cols = fp4_vals.shape
+                    for r in range(32):
+                        line = []
+                        for c in range(32):
+                            if not mask_buffer[r, c]:
+                                # 被 prune 的位置
+                                bitstr = f"{s[r,c].item()}-{e[r,c].item():02b}-{m[r,c].item()}"
+                                line.append(bitstr)
+                            else:
+                                line.append("  .   ")
+                        print(" ".join(line))
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
