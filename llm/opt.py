@@ -147,9 +147,9 @@ def opt_sequential(model, dataloader, dev):
             h.remove()
 
         for name in subset:
-            if i == 0: # 仅针对第一层
-                print(f"Visualizing {name} before pruning...")
-                plot_weight_heatmap(subset[name].weight, f"{name} - Before Pruning", f"{name}_pre.png")
+            # if i == 0: # 仅针对第一层
+            #     print(f"Visualizing {name} before pruning...")
+            #     plot_weight_heatmap(subset[name].weight, f"{name} - Before Pruning", f"{name}_pre.png")
 
             print(i, name)
             print('Quantizing ...')
@@ -157,9 +157,9 @@ def opt_sequential(model, dataloader, dev):
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem, plot=(i==0), name=name
             )
 
-            if i == 0: # 仅针对第一层
-                print(f"Visualizing {name} after pruning/quant...")
-                plot_weight_heatmap(subset[name].weight, f"{name} - After Pruning", f"{name}_post.png")
+            # if i == 0: # 仅针对第一层
+            #     print(f"Visualizing {name} after pruning/quant...")
+            #     plot_weight_heatmap(subset[name].weight, f"{name} - After Pruning", f"{name}_post.png")
 
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()

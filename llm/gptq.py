@@ -14,6 +14,60 @@ DEBUG = False
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+# FP4(E2M1) hardcoded LUT (positive values only)
+# index = (exponent << 1) | mantissa
+FP4_E2M1_LUT = torch.tensor(
+    [0.0,   # E=00 M=0
+     0.5,   # E=00 M=1
+     1.0,   # E=01 M=0
+     1.5,   # E=01 M=1
+     2.0,   # E=10 M=0
+     3.0,   # E=10 M=1
+     4.0,   # E=11 M=0
+     6.0]   # E=11 M=1
+)
+
+def fp4_e2m1_decompose(tensor):
+    """
+    Hardcoded FP4(E2M1) decomposition.
+    Returns: sign, exponent_bits (0–3), mantissa_bit (0/1)
+    """
+    x = tensor.clone()
+
+    # sign bit
+    sign = (x < 0).int()
+    x = x.abs()
+
+    # flatten for vectorized LUT match
+    x_flat = x.view(-1, 1)
+    lut = FP4_E2M1_LUT.to(x.device).view(1, -1)
+
+    # nearest FP4 value
+    idx = torch.argmin((x_flat - lut).abs(), dim=1)
+
+    exponent = (idx >> 1).view(x.shape)   # high bit
+    mantissa = (idx & 1).view(x.shape)    # low bit
+
+    return sign, exponent, mantissa
+
+def plot_fp4_exponent_heatmap(Wq, title, filename):
+    _, e, _ = fp4_e2m1_decompose(Wq)
+
+    plot_weight_heatmap(
+        e.float(),
+        title + " (FP4 Exponent Bits)",
+        filename
+    )
+
+def plot_fp4_mantissa_heatmap(Wq, title, filename):
+    _, _, m = fp4_e2m1_decompose(Wq)
+
+    plot_weight_heatmap(
+        m.float(),
+        title + " (FP4 Mantissa Bit)",
+        filename
+    )
+
 class GPTQ:
 
     def __init__(self, layer):
@@ -162,9 +216,9 @@ class GPTQ:
                             pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
                             mean_buffer = pruned_sum / prunen
 
-                            if i1 == 0 and i == 0 and plot:
-                                plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", f"pruned_weights_{name}_block_0.png")
-                                plot_weight_heatmap(mask_buffer, f"Pruning Mask at Block {i}", f"pruning_mask_{name}_block_0.png")
+                            # if i1 == 0 and i == 0 and plot:
+                            #     plot_weight_heatmap(w_group * (~mask_buffer), f"Pruned Weights at Block {i}", f"pruned_weights_{name}_block_0.png")
+                            #     plot_weight_heatmap(mask_buffer, f"Pruning Mask at Block {i}", f"pruning_mask_{name}_block_0.png")
 
                             # case4: zero compensation
                             # mean_buffer = torch.zeros_like(w)
@@ -191,7 +245,8 @@ class GPTQ:
                 Err1[:, i] = err1
 
                 if i1 == 0 and i == prunem - 1 and plot and mask_buffer is not None:
-                    plot_weight_heatmap(Q1[:, :prunem] * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", f"quantized_weights_{name}_block_0.png")
+                    # plot_weight_heatmap(Q1[:, :prunem] * (~mask_buffer), f"Quantized Pruned Weights at Block {i}", f"quantized_weights_{name}_block_0.png")
+                    plot_fp4_mantissa_heatmap((Q1[:, :prunem] * (~mask_buffer)) / self.quantizer.scale, f"FP4 Mantissa at Block {i}", f"fp4_mantissa_{name}_block_0.png")
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
