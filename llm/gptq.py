@@ -119,9 +119,7 @@ class GPTQ:
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
-            # print("HINV Shape", W.shape, W1.shape, Hinv.shape, Hinv1.shape)
-            mask_buffer = None
-            mean_buffer = None
+
             for i in range(count):
                 w = W1[:, i]
                 d = Hinv1[i, i]
@@ -135,50 +133,8 @@ class GPTQ:
                         if actorder:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
-                
-                if prunen != 0 and i % prunem == 0:
-                    if i + prunem <= count:
-                        w_group = W1[:, i:(i + prunem)].clone()
-                    
-                        # scores = w_group.abs()
 
-                        diag_group = torch.tensor([Hinv1[j, j] for j in range(i, i + prunem)], device=self.dev)
-                        scores = (w_group ** 2) / (diag_group ** 2)
-                        
-                        _, indices_to_prune = torch.topk(scores, k=prunen, dim=1, largest=False)
-                        mask_buffer = torch.ones_like(w_group, dtype=torch.bool)
-                        mask_buffer.scatter_(dim=1, index=indices_to_prune, value=False)
-
-                        with torch.no_grad():
-                            # case1: mean of kept weights
-                            # kept_sum = (w_group * mask_buffer).sum(dim=1) 
-                            # mean_buffer = kept_sum / (prunem - prunen) 
-
-                            # case2: mean of original weights
-                            # kept_sum = w_group.sum(dim=1) 
-                            # mean_buffer = kept_sum / prunem
-
-                            # case3: mean of pruned weights
-                            pruned_sum = (w_group * (~mask_buffer)).sum(dim=1)
-                            mean_buffer = pruned_sum / prunen
-
-                            #case4: zero compensation
-                            # mean_buffer = torch.zeros_like(w)
-                    else:
-                        mask_buffer = None
-                        mean_buffer = None
-                
-                # If pruning mask exists, replace pruned entries in `w` with the
-                # compensation mean before quantizing so quantization operates on
-                # the pruned-compensated weight vector.
-                if mask_buffer is not None:
-                    col_mask = mask_buffer[:, i % prunem]
-                    col_mean = mean_buffer
-                    w_to_quant = torch.where(col_mask, w, col_mean)
-                else:
-                    w_to_quant = w
-
-                q = quantize(w_to_quant.unsqueeze(1), self.quantizer.scale).flatten()
+                q = quantize(w.unsqueeze(1), self.quantizer.scale).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
@@ -203,6 +159,30 @@ class GPTQ:
 
         if actorder:
             Q = Q[:, invperm]
+        
+        # ==================== 修改部分：N:M 结构化剪枝 ====================
+        if prunen != 0 and prunem != 0:
+            print(f"Post-quantization pruning: Applying {prunen}:{prunem} sparsity.")
+            out_features, in_features = Q.shape
+            
+            # 针对 N:M，通常在输入特征维度（in_features）进行分组
+            if in_features % prunem == 0:
+                # 1. 重塑形状为 (out_features, 组数, M)
+                W_temp = Q.view(out_features, -1, prunem)
+                
+                # 2. 找到每组中绝对值最大的前 N 个元素的索引
+                # topk 会返回前 prunen 个最大值的索引
+                _, topk_indices = torch.topk(torch.abs(W_temp), prunen, dim=2)
+                
+                # 3. 创建掩码并应用
+                mask = torch.zeros_like(W_temp, dtype=torch.bool)
+                mask.scatter_(2, topk_indices, True)
+                
+                # 将不属于 top-N 的元素置零
+                Q = (W_temp * mask).view(out_features, in_features)
+            else:
+                print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
+        # ================================================================
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
