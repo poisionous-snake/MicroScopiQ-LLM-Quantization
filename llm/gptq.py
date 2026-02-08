@@ -178,8 +178,24 @@ class GPTQ:
                 mask = torch.zeros_like(W_temp, dtype=torch.bool)
                 mask.scatter_(2, topk_indices, True)
                 
-                # 将不属于 top-N 的元素置零
-                Q = (W_temp * mask).view(out_features, in_features)
+                # 4. 计算被剪掉部分的平均值
+                # 提取出非 Top-N 的元素，其余位置设为 0 以便求和
+                pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
+
+                # 每组被剪掉元素的总和
+                pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
+
+                # 每组被剪掉元素的个数
+                num_pruned = prunem - prunen
+
+                # 计算均值
+                pruned_mean = pruned_sum / num_pruned
+                
+                # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
+                W_final = torch.where(mask, W_temp, pruned_mean)
+            
+                # 6. 还原回原始二维形状
+                Q = W_final.view(out_features, in_features)
             else:
                 print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
         # ================================================================
