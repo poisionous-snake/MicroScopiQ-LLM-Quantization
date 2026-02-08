@@ -14,6 +14,45 @@ DEBUG = False
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+# FP4(E2M1) hardcoded LUT (positive values only)
+# index = (exponent << 1) | mantissa
+FP4_E2M1_LUT = torch.tensor(
+    [0.0,   # E=00 M=0
+     0.5,   # E=00 M=1
+     1.0,   # E=01 M=0
+     1.5,   # E=01 M=1
+     2.0,   # E=10 M=0
+     3.0,   # E=10 M=1
+     4.0,   # E=11 M=0
+     6.0]   # E=11 M=1
+)
+
+def fp4_e2m1_decompose(tensor):
+    """
+    Hardcoded FP4(E2M1) decomposition.
+    Returns: sign, exponent_bits (0–3), mantissa_bit (0/1)
+    """
+    x = tensor.clone()
+
+    # sign bit
+    sign = (x < 0).int()
+    x = x.abs()
+
+    # flatten for vectorized LUT match
+    x_flat = x.view(-1, 1)
+    lut = FP4_E2M1_LUT.to(x.device).view(1, -1)
+
+    # nearest FP4 value
+    idx = torch.argmin((x_flat - lut).abs(), dim=1)
+
+    exponent = (idx >> 1).view(x.shape)   # high bit
+    mantissa = (idx & 1).view(x.shape)    # low bit
+
+    return sign, exponent, mantissa
+
+def fp4_bits_to_str(sign, exp, man):
+    return f"{sign}-{exp:02b}-{man}"
+
 class GPTQ:
 
     def __init__(self, layer):
@@ -58,7 +97,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
     ):
         # 打印N:M
         if prunen != 0:
@@ -194,6 +233,43 @@ class GPTQ:
                 # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
                 W_final = torch.where(mask, W_temp, pruned_mean)
             
+                # --- 新增：FP4 比特打印逻辑 (调试用) ---
+                if plot:
+                # 提取被剪枝位置（即 mask 为 False 的位置）的值
+                # 为了观察 FP4 比特，我们需要除以 scale 还原到量化空间
+                    current_scale = self.quantizer.scale
+
+                    if current_scale.dim() == 2:
+                        # 扩展 scale 维度到 (out_features, 1, 1) 以匹配 (out_features, groups, prunem)
+                        scale_reshaped = current_scale.unsqueeze(2)
+                    else:
+                        scale_reshaped = current_scale
+
+                    fp4_query_vals = (W_final / scale_reshaped)
+                    
+                    # 获取比特分解
+                    s, e, m = fp4_e2m1_decompose(fp4_query_vals)
+                    
+                    print(f"\n[FP4 Bits for Pruned Elements (Replaced by Mean) | {prunen}:{prunem}]")
+                    # 打印前 32xM 范围内的结构
+                    rows_to_print = min(32, out_features)
+                    groups_to_print = W_final.shape[1]
+
+                    for r in range(rows_to_print):
+                        group_bits = []
+                        for i in range(prunem):
+                            is_topn = mask[r, 0, i]
+                            if not is_topn:
+                                # 被剪枝的位置，现在显示的是均值的 FP4 比特
+                                bitstr = f"{s[r, 0, i].item()}-{e[r, 0, i].item():02b}-{m[r, 0, i].item()}"
+                                group_bits.append(f"{bitstr}")
+                            else:
+                                # 保留的 Top-N 位置
+                                group_bits.append("   .  ")
+                        
+                        # 每个 group 打印完后直接输出并换行
+                        print(" ".join(group_bits))
+
                 # 6. 还原回原始二维形状
                 Q = W_final.view(out_features, in_features)
             else:
