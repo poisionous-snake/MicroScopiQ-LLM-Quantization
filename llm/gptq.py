@@ -119,6 +119,7 @@ class GPTQ:
             self.quantizer.find_params(W)
 
         H = self.H
+        H_diag = torch.diag(H).clone()
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -201,37 +202,46 @@ class GPTQ:
         
         # ==================== 修改部分：N:M 结构化剪枝 ====================
         if prunen != 0 and prunem != 0:
-            print(f"Post-quantization pruning: Applying {prunen}:{prunem} sparsity.")
+            print(f"Applying post-quantization wanda {prunen}:{prunem} pruning.")
             out_features, in_features = Q.shape
+
+            act_norm = torch.sqrt(H_diag + 1e-8)  # shape: (in_features,)
+            if actorder:
+                act_norm = act_norm[invperm]
+
+            W_metric = torch.abs(Q) * act_norm.view(1, -1)
             
             # 针对 N:M，通常在输入特征维度（in_features）进行分组
             if in_features % prunem == 0:
                 # 1. 重塑形状为 (out_features, 组数, M)
                 W_temp = Q.view(out_features, -1, prunem)
-                
+                M_temp = W_metric.view(out_features, -1, prunem)
+
                 # 2. 找到每组中绝对值最大的前 N 个元素的索引
                 # topk 会返回前 prunen 个最大值的索引
-                _, topk_indices = torch.topk(torch.abs(W_temp), prunen, dim=2)
+                _, topk_indices = torch.topk(M_temp, prunen, dim=2, largest=True)
                 
                 # 3. 创建掩码并应用
                 mask = torch.zeros_like(W_temp, dtype=torch.bool)
                 mask.scatter_(2, topk_indices, True)
                 
-                # 4. 计算被剪掉部分的平均值
-                # 提取出非 Top-N 的元素，其余位置设为 0 以便求和
-                pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
+                # # 4. 计算被剪掉部分的平均值
+                # # 提取出非 Top-N 的元素，其余位置设为 0 以便求和
+                # pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
 
-                # 每组被剪掉元素的总和
-                pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
+                # # 每组被剪掉元素的总和
+                # pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
 
-                # 每组被剪掉元素的个数
-                num_pruned = prunem - prunen
+                # # 每组被剪掉元素的个数
+                # num_pruned = prunem - prunen
 
-                # 计算均值
-                pruned_mean = pruned_sum / num_pruned
+                # # 计算均值
+                # pruned_mean = pruned_sum / num_pruned
                 
-                # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
-                W_final = torch.where(mask, W_temp, pruned_mean)
+                # # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
+                # W_final = torch.where(mask, W_temp, pruned_mean)
+                # 5. 0填充
+                W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
             
                 # --- 新增：FP4 比特打印逻辑 (调试用) ---
                 if plot:
