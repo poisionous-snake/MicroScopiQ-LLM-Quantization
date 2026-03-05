@@ -240,9 +240,23 @@ class GPTQ:
                 
                 # # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
                 # W_final = torch.where(mask, W_temp, pruned_mean)
-                # 5. 0填充
-                W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
-            
+
+                # # 5. 0填充
+                # W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
+
+                # 4 activation-aware replacement
+                act2 = act_norm.view(1, -1, prunem)
+
+                pruned = ~mask
+
+                num = torch.sum(W_temp * act2 * pruned, dim=2, keepdim=True)
+                den = torch.sum(act2 * pruned, dim=2, keepdim=True) + 1e-8 
+
+                replacement = num / den
+
+                # 5 fill
+                W_final = torch.where(mask, W_temp, replacement)
+
                 # --- 新增：FP4 比特打印逻辑 (调试用) ---
                 if plot:
                 # 提取被剪枝位置（即 mask 为 False 的位置）的值
