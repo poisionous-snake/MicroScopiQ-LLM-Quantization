@@ -286,7 +286,8 @@ class GPTQ:
                     else:
                         scale_reshaped = current_scale
 
-                    fp4_query_vals = (W_final / scale_reshaped)
+                    # TODO: to plot original(not compensated) pruned weights, here should be W_temp
+                    fp4_query_vals = (W_temp / scale_reshaped)
                     
                     # 获取比特分解
                     s, e, m = fp4_e2m1_decompose(fp4_query_vals)
