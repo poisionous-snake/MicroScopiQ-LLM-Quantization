@@ -125,13 +125,13 @@ class GPTQ:
         H[dead, dead] = 1
         W[:, dead] = 0
 
-        if static_groups:
-            import copy
-            groups = []
-            for i in range(0, self.columns, groupsize):
-                quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i:(i + groupsize)])
-                groups.append(quantizer)
+        # if static_groups:
+        import copy
+        groups = []
+        for i in range(0, self.columns, groupsize):
+            quantizer = copy.deepcopy(self.quantizer)
+            quantizer.find_params(W[:, i:(i + groupsize)])
+            groups.append(quantizer)
 
         if actorder:
             perm = torch.argsort(torch.diag(H), descending=True)
@@ -259,18 +259,36 @@ class GPTQ:
                 # W_final = torch.where(mask, W_temp, replacement)
 
                 # ============ SIGN-AWARE MEAN REPLACEMENT ============
-                # 
-                pos_mask = (pruned_elements > 0)
-                neg_mask = (pruned_elements < 0)
-                zero_mask = (pruned_elements == 0)
-                pos_count = torch.sum(pos_mask, dim=2, keepdim=True).clamp(min=1)
-                neg_count = torch.sum(neg_mask, dim=2, keepdim=True).clamp(min=1)
-                pos_mean = torch.sum(W_temp * pos_mask, dim=2, keepdim=True) / pos_count
-                neg_mean = torch.sum(W_temp * neg_mask, dim=2, keepdim=True) / neg_count
+                # pos_mask = (pruned_elements > 0)
+                # neg_mask = (pruned_elements < 0)
+                # zero_mask = (pruned_elements == 0)
+                # pos_count = torch.sum(pos_mask, dim=2, keepdim=True).clamp(min=1)
+                # neg_count = torch.sum(neg_mask, dim=2, keepdim=True).clamp(min=1)
+                # pos_mean = torch.sum(W_temp * pos_mask, dim=2, keepdim=True) / pos_count
+                # neg_mean = torch.sum(W_temp * neg_mask, dim=2, keepdim=True) / neg_count
 
+                # replacement = torch.zeros_like(W_temp)
+                # replacement = torch.where(pos_mask, pos_mean, replacement)
+                # replacement = torch.where(neg_mask, neg_mean, replacement)
+
+                # W_final = torch.where(mask, W_temp, replacement)
+
+                # ============ SIGN-AWARE MEAN REPLACEMENT ============
                 replacement = torch.zeros_like(W_temp)
-                replacement = torch.where(pos_mask, pos_mean, replacement)
-                replacement = torch.where(neg_mask, neg_mean, replacement)
+
+                pos_mask = ~mask & (pruned_elements > 0)
+                neg_mask = ~mask & (pruned_elements < 0)
+
+                all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
+                assert(all_scales.shape[0] == out_features)
+                assert(all_scales.shape[1] == (in_features / prunem))
+                all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
+                # FIXME: 
+                assert(prunem == groupsize)
+                epsilon = 0.5 * all_scales
+
+                replacement = torch.where(pos_mask, epsilon, replacement)
+                replacement = torch.where(neg_mask, -epsilon, replacement)
 
                 W_final = torch.where(mask, W_temp, replacement)
 
@@ -278,7 +296,7 @@ class GPTQ:
                 if plot:
                 # 提取被剪枝位置（即 mask 为 False 的位置）的值
                 # 为了观察 FP4 比特，我们需要除以 scale 还原到量化空间
-                    current_scale = self.quantizer.scale
+                    current_scale = groups[0].scale
 
                     if current_scale.dim() == 2:
                         # 扩展 scale 维度到 (out_features, 1, 1) 以匹配 (out_features, groups, prunem)
