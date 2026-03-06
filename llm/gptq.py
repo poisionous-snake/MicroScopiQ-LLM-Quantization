@@ -224,12 +224,11 @@ class GPTQ:
                 # 3. 创建掩码并应用
                 mask = torch.zeros_like(W_temp, dtype=torch.bool)
                 mask.scatter_(2, topk_indices, True)
-                
-                # # 4. 计算被剪掉部分的平均值
-                # # 提取出非 Top-N 的元素，其余位置设为 0 以便求和
-                # pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
 
-                # # 每组被剪掉元素的总和
+                pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
+
+                # ============ MEAN ============
+                # # 4. 计算被剪掉部分的平均值
                 # pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
 
                 # # 每组被剪掉元素的个数
@@ -241,20 +240,38 @@ class GPTQ:
                 # # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
                 # W_final = torch.where(mask, W_temp, pruned_mean)
 
+                # ============ ZERO ============
                 # # 5. 0填充
                 # W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
 
-                # 4 activation-aware replacement
-                act2 = act_norm.view(1, -1, prunem)
+                # ============ ACTIVATION-AWARE REPLACEMENT ============
+                # # 4 activation-aware replacement
+                # act2 = act_norm.view(1, -1, prunem)
 
-                pruned = ~mask
+                # pruned = ~mask
 
-                num = torch.sum(W_temp * act2 * pruned, dim=2, keepdim=True)
-                den = torch.sum(act2 * pruned, dim=2, keepdim=True) + 1e-8 
+                # num = torch.sum(W_temp * act2 * pruned, dim=2, keepdim=True)
+                # den = torch.sum(act2 * pruned, dim=2, keepdim=True) + 1e-8 
 
-                replacement = num / den
+                # replacement = num / den
 
-                # 5 fill
+                # # 5 fill
+                # W_final = torch.where(mask, W_temp, replacement)
+
+                # ============ SIGN-AWARE MEAN REPLACEMENT ============
+                # 
+                pos_mask = (pruned_elements > 0)
+                neg_mask = (pruned_elements < 0)
+                zero_mask = (pruned_elements == 0)
+                pos_count = torch.sum(pos_mask, dim=2, keepdim=True).clamp(min=1)
+                neg_count = torch.sum(neg_mask, dim=2, keepdim=True).clamp(min=1)
+                pos_mean = torch.sum(W_temp * pos_mask, dim=2, keepdim=True) / pos_count
+                neg_mean = torch.sum(W_temp * neg_mask, dim=2, keepdim=True) / neg_count
+
+                replacement = torch.zeros_like(W_temp)
+                replacement = torch.where(pos_mask, pos_mean, replacement)
+                replacement = torch.where(neg_mask, neg_mean, replacement)
+
                 W_final = torch.where(mask, W_temp, replacement)
 
                 # --- 新增：FP4 比特打印逻辑 (调试用) ---
