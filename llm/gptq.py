@@ -274,21 +274,43 @@ class GPTQ:
                 # W_final = torch.where(mask, W_temp, replacement)
 
                 # ============ SIGN-AWARE MEAN REPLACEMENT ============
-                replacement = torch.zeros_like(W_temp)
+                # replacement = torch.zeros_like(W_temp)
 
-                pos_mask = ~mask & (pruned_elements > 0)
-                neg_mask = ~mask & (pruned_elements < 0)
+                # pos_mask = ~mask & (pruned_elements > 0)
+                # neg_mask = ~mask & (pruned_elements < 0)
 
-                all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
+                # all_scales = torch.cat([group.scale for group in groups], dim=1) # (out_features, in_features / groupsize)
+                # assert(all_scales.shape[0] == out_features)
+                # assert(all_scales.shape[1] == (in_features / prunem))
+                # all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
+                # # FIXME: 
+                # assert(prunem == groupsize)
+                # epsilon = 0.5 * all_scales
+
+                # replacement = torch.where(pos_mask, epsilon, replacement)
+                # replacement = torch.where(neg_mask, -epsilon, replacement)
+
+                # W_final = torch.where(mask, W_temp, replacement)
+
+                # ======== SUM DETERMINED SIGN REPLACEMENT ========
+                block_sum = pruned_elements.sum(dim=2, keepdim=True)
+
+                pos_block = ~mask & (block_sum > 0) # TODO:
+                neg_block = ~mask & (block_sum < 0)
+
+                all_scales = torch.cat([group.scale for group in groups], dim=1) # (out_features, in_features / groupsize)
                 assert(all_scales.shape[0] == out_features)
                 assert(all_scales.shape[1] == (in_features / prunem))
                 all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
                 # FIXME: 
                 assert(prunem == groupsize)
-                epsilon = 0.5 * all_scales
 
-                replacement = torch.where(pos_mask, epsilon, replacement)
-                replacement = torch.where(neg_mask, -epsilon, replacement)
+                epsilon = 0.5 * all_scales
+                pos_block = pos_block.expand(-1, -1, prunem)
+                neg_block = neg_block.expand(-1, -1, prunem)
+                replacement = torch.zeros_like(W_temp)
+                replacement = torch.where((~mask) & pos_block, epsilon, replacement)
+                replacement = torch.where((~mask) & neg_block,  -epsilon, replacement)
 
                 W_final = torch.where(mask, W_temp, replacement)
 
