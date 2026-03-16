@@ -318,7 +318,8 @@ class GPTQ:
                     for r in range(rows_to_print):
                         group_bits = []
                         for i in range(prunem):
-                            is_topn = mask[r, 0, i]
+                            # TODO: 这里是打印保留的部分
+                            is_topn = ~mask[r, 0, i]
                             if not is_topn:
                                 # 被剪枝的位置，现在显示的是均值的 FP4 比特
                                 bitstr = f"{s[r, 0, i].item()}-{e[r, 0, i].item():02b}-{m[r, 0, i].item()}"
