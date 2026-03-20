@@ -95,6 +95,85 @@ class GPTQ:
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
+    
+    def vq(self, Q, groups, group_size=4, k=16):
+        """
+        Q: 量化剪枝后的向量
+        groups: scale
+        group_size: VQ的分组大小
+        k: VQ的码本大小
+        """
+        out_features, in_features = Q.shape
+
+        # 还原到FP4空间
+        all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
+        assert(all_scales.shape[0] == out_features)
+        assert(all_scales.shape[1] == (in_features / 32))
+        all_scales = all_scales.unsqueeze(2).expand(-1, -1, 32)
+        all_scales = all_scales.reshape(out_features, in_features)
+
+        x = Q / all_scales
+
+        # 分解到FP4比特
+        sign, exp, man = fp4_e2m1_decompose(x)
+
+        # 按vq的group_size分组
+        G = in_features // group_size
+
+        exp_grouped = exp.view(out_features, G, group_size)
+        man_grouped = man.view(out_features, G, group_size)
+        sign_grouped = sign.view(out_features, G, group_size)
+
+        # flatten到[num_samples, d]
+        X = exp_grouped.reshape(-1, group_size)  # 所有 group 混在一起
+
+        # top-k pattern
+        # TODO: K-means
+        keys = torch.zeros(X.shape[0], dtype=torch.long)
+        for i in range(group_size):
+            keys += X[:, i] * (4 ** (group_size - 1 - i))
+
+        unique, counts = torch.unique(keys, return_counts=True)
+        # 打印分布情况
+        print(f"Unique patterns: {unique.numel()}")
+        print(f"Pattern counts: {counts}")
+
+        topk = counts.topk(min(k, unique.numel()))
+        topk_keys = unique[topk.indices] 
+
+        # codebook
+        codebook = []
+        for key in topk_keys:
+            pattern = []
+            tmp = key.item()
+            for _ in range(group_size):
+                pattern.append(tmp % 4)
+                tmp //= 4
+            pattern = pattern[::-1]
+            codebook.append(pattern)
+
+        codebook = torch.tensor(codebook)  # [k, d]
+
+        # assign最近pattern
+        # [N, k]
+        dist = ((X.unsqueeze(1) - codebook.unsqueeze(0)) ** 2).sum(-1)
+        labels = dist.argmin(dim=1)
+
+        X_q = codebook[labels]  # [N, d]
+
+        # reshape & 重构
+        exp_q = X_q.view(out_features, G, group_size)
+        man_q = man_grouped
+        sign_q = sign_grouped
+        idx = (exp_q << 1) | man_q  # [out, G, d]
+        lut = FP4_E2M1_LUT
+        val = lut[idx]  # 正数
+        val = torch.where(sign_q.bool(), -val, val)
+        val = val * all_scales.view(out_features, G, group_size)
+
+        Q_new = val.view(out_features, in_features)
+
+        return Q_new
 
     def fasterquant(
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
@@ -335,6 +414,12 @@ class GPTQ:
             else:
                 print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
         # ================================================================
+
+        # ==================== EXPONENT VQ ====================
+        if groupsize != -1:
+            print("Applying exponent VQ...")
+            Q = self.vq(Q, groups, 4, k=16)
+        # ====================================================
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
