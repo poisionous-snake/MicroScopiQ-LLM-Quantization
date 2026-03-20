@@ -104,6 +104,7 @@ class GPTQ:
         k: VQ的码本大小
         """
         out_features, in_features = Q.shape
+        device = Q.device
 
         # 还原到FP4空间
         all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
@@ -129,7 +130,7 @@ class GPTQ:
 
         # top-k pattern
         # TODO: K-means
-        keys = torch.zeros(X.shape[0], dtype=torch.long)
+        keys = torch.zeros(X.shape[0], device=device, dtype=torch.long)
         for i in range(group_size):
             keys += X[:, i] * (4 ** (group_size - 1 - i))
 
@@ -152,7 +153,7 @@ class GPTQ:
             pattern = pattern[::-1]
             codebook.append(pattern)
 
-        codebook = torch.tensor(codebook)  # [k, d]
+        codebook = torch.tensor(codebook, device=device)  # [k, d]
 
         # assign最近pattern
         # [N, k]
@@ -166,7 +167,7 @@ class GPTQ:
         man_q = man_grouped
         sign_q = sign_grouped
         idx = (exp_q << 1) | man_q  # [out, G, d]
-        lut = FP4_E2M1_LUT
+        lut = FP4_E2M1_LUT.to(device)  # [16]
         val = lut[idx]  # 正数
         val = torch.where(sign_q.bool(), -val, val)
         val = val * all_scales.view(out_features, G, group_size)
