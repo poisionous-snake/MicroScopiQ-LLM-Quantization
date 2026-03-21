@@ -53,6 +53,41 @@ def fp4_e2m1_decompose(tensor):
 def fp4_bits_to_str(sign, exp, man):
     return f"{sign}-{exp:02b}-{man}"
 
+def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
+    """
+    exp_g: [N, d]
+    man_g: [N, d]
+    """
+    N = exp_g.shape[0]
+
+    # === 初始化 centroid（从数据中采样）===
+    unique_exp = torch.unique(exp_g, dim=0) # [U, d]
+    print(f"Unique exponent patterns: {unique_exp.shape[0]}")
+    idx = torch.randperm(unique_exp.shape[0])[:k]
+    centroids = unique_exp[idx].float() # [k, d]
+
+    for _ in range(iters):
+        dist = ((exp_g.unsqueeze(1) - centroids.unsqueeze(0)) ** 2).sum(-1)  # [N, k]
+
+        labels = dist.argmin(dim=1)         # [N]
+
+        # ===== update =====
+        new_centroids = []
+        for i in range(k):
+            mask = (labels == i) # 找到属于第 i 类的所有样本
+            if mask.sum() == 0: # 如果该类没有样本
+                new_centroids.append(centroids[i])
+            else:
+                # ⚠️ 只更新 exponent（关键约束）
+                new_centroids.append(exp_g[mask].float().mean(dim=0)) 
+
+        centroids = torch.stack(new_centroids)
+
+        # 离散化回 0~3
+        centroids = centroids.round().clamp(0, 3)
+
+    return centroids.long(), labels
+    
 class GPTQ:
 
     def __init__(self, layer):
@@ -96,85 +131,53 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
     
-    def vq(self, Q, groups, group_size=4, k=16):
+    def vq(self, Q, mask, m, n, all_scales, group_size=4, k=16):
         """
         Q: 量化剪枝后的向量
         groups: scale
         group_size: VQ的分组大小
         k: VQ的码本大小
         """
-        out_features, in_features = Q.shape
+        out_features, in_features = Q.shape[0], Q.shape[1] * Q.shape[2]
         device = Q.device
 
         # 还原到FP4空间
-        all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
-        assert(all_scales.shape[0] == out_features)
-        assert(all_scales.shape[1] == (in_features / 32))
-        all_scales = all_scales.unsqueeze(2).expand(-1, -1, 32)
-        all_scales = all_scales.reshape(out_features, in_features)
+        fp4_val = Q / all_scales
 
-        x = Q / all_scales
+        dense_out_feature = (in_features * n) // m
+        G = dense_out_feature // group_size
+        x = fp4_val.masked_select(mask).view(
+            out_features, G, group_size
+        )
+        print(x[:4][:24])
 
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
 
-        # 按vq的group_size分组
-        G = in_features // group_size
+        # === reshape ===
+        X_exp = exp.reshape(-1, group_size)
+        X_man = man.reshape(-1, group_size)
 
-        exp_grouped = exp.view(out_features, G, group_size)
-        man_grouped = man.view(out_features, G, group_size)
-        sign_grouped = sign.view(out_features, G, group_size)
+        # === K-means ===
+        centroids, labels = kmeans_exp_vq(X_exp, X_man, k=16, iters=10)
 
-        # flatten到[num_samples, d]
-        X = exp_grouped.reshape(-1, group_size)  # 所有 group 混在一起
-
-        # top-k pattern
-        # TODO: K-means
-        keys = torch.zeros(X.shape[0], device=device, dtype=torch.long)
-        for i in range(group_size):
-            keys += X[:, i] * (4 ** (group_size - 1 - i))
-
-        unique, counts = torch.unique(keys, return_counts=True)
-        # 打印分布情况
-        print(f"Unique patterns: {unique.numel()}")
-        print(f"Pattern counts: {counts}")
-
-        topk = counts.topk(min(k, unique.numel()))
-        topk_keys = unique[topk.indices] 
-
-        # codebook
-        codebook = []
-        for key in topk_keys:
-            pattern = []
-            tmp = key.item()
-            for _ in range(group_size):
-                pattern.append(tmp % 4)
-                tmp //= 4
-            pattern = pattern[::-1]
-            codebook.append(pattern)
-
-        codebook = torch.tensor(codebook, device=device)  # [k, d]
-
-        # assign最近pattern
-        # [N, k]
-        dist = ((X.unsqueeze(1) - codebook.unsqueeze(0)) ** 2).sum(-1)
-        labels = dist.argmin(dim=1)
-
-        X_q = codebook[labels]  # [N, d]
-
-        # reshape & 重构
+        # === 重建 ===
+        X_q = centroids[labels]
         exp_q = X_q.view(out_features, G, group_size)
-        man_q = man_grouped
-        sign_q = sign_grouped
-        idx = (exp_q << 1) | man_q  # [out, G, d]
+
+        idx = (exp_q << 1) | man  # [out, G, d]
         lut = FP4_E2M1_LUT.to(device)  # [16]
         val = lut[idx]  # 正数
-        val = torch.where(sign_q.bool(), -val, val)
-        val = val * all_scales.view(out_features, G, group_size)
+        val = torch.where(sign.bool(), -val, val)
 
-        Q_new = val.view(out_features, in_features)
+        # 重构为sparse格式
+        sparse_val = torch.zeros((out_features, in_features), device=device)
+        sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
+        val = sparse_val * all_scales.reshape(out_features, in_features)
 
-        return Q_new
+        print(val[:4][:32])
+
+        return val
 
     def fasterquant(
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
@@ -307,6 +310,7 @@ class GPTQ:
 
                 pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
 
+                """
                 # ============ MEAN ============
                 # # 4. 计算被剪掉部分的平均值
                 # pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
@@ -352,6 +356,7 @@ class GPTQ:
                 # replacement = torch.where(neg_mask, neg_mean, replacement)
 
                 # W_final = torch.where(mask, W_temp, replacement)
+                """
 
                 # ============ SIGN-AWARE MEAN REPLACEMENT ============
                 replacement = torch.zeros_like(W_temp)
@@ -361,7 +366,7 @@ class GPTQ:
 
                 all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
                 assert(all_scales.shape[0] == out_features)
-                assert(all_scales.shape[1] == (in_features / prunem))
+                assert(all_scales.shape[1] == (in_features // prunem))
                 all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
                 # FIXME: 
                 assert(prunem == groupsize)
@@ -370,7 +375,13 @@ class GPTQ:
                 replacement = torch.where(pos_mask, epsilon, replacement)
                 replacement = torch.where(neg_mask, -epsilon, replacement)
 
-                W_final = torch.where(mask, W_temp, replacement)
+                # ==================== EXPONENT VQ ====================
+                if groupsize != -1:
+                    print("Applying exponent VQ...")
+                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, 4, k=16)
+                # ====================================================
+
+                W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
 
                 # --- 新增：FP4 比特打印逻辑 (调试用) ---
                 if plot:
@@ -415,12 +426,6 @@ class GPTQ:
             else:
                 print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
         # ================================================================
-
-        # ==================== EXPONENT VQ ====================
-        if groupsize != -1:
-            print("Applying exponent VQ...")
-            Q = self.vq(Q, groups, 4, k=16)
-        # ====================================================
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
