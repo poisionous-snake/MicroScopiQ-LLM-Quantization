@@ -159,8 +159,8 @@ class GPTQ:
         X_man = man.reshape(-1, group_size)
 
         # === K-means ===
-        centroids, labels = kmeans_exp_vq(X_exp, X_man, k=16, iters=10)
-
+        centroids, labels = kmeans_exp_vq(X_exp, X_man, k, iters=10)
+        print("Number of unique centroids:", len(centroids))
         # === 重建 ===
         X_q = centroids[labels]
         exp_q = X_q.view(out_features, G, group_size)
@@ -175,12 +175,12 @@ class GPTQ:
         sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
         val = sparse_val * all_scales.reshape(out_features, in_features)
 
-        print(val[:4][:32])
+        print(sparse_val[:4][:32])
 
         return val
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False, vq_dim=4, codebook_size=16
     ):
         # 打印N:M
         if prunen != 0:
@@ -378,7 +378,7 @@ class GPTQ:
                 # ==================== EXPONENT VQ ====================
                 if groupsize != -1:
                     print("Applying exponent VQ...")
-                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, 4, k=16)
+                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size)
                 # ====================================================
 
                 W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
