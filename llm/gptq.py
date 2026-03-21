@@ -154,6 +154,15 @@ class GPTQ:
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
 
+        for rows in range(out_features):
+            x = exp[rows]
+            cnt = torch.zeros(G, device=exp.device, dtype=torch.int32)
+            for i in range(G):
+                cnt[i] = x[i, 0] + x[i, 2] * 4 + x[i, 3] * 16 + x[i, 1] * 64
+            # 统计cnt中的unique格式
+            unique_cnt = torch.unique(cnt)
+            print(f"Unique exponent patterns in groups: {len(unique_cnt)}")
+
         # === reshape ===
         X_exp = exp.reshape(-1, group_size)
         X_man = man.reshape(-1, group_size)
