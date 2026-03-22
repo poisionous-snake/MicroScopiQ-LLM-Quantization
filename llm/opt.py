@@ -105,7 +105,7 @@ def opt_sequential(model, dataloader, dev):
             print(i, name)
             print('Quantizing ...')
             gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem, plot=False, vq_dim=args.vq_dim, codebook_size=args.codebook_size
+                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups, prunen=args.prunen, prunem=args.prunem, plot=False, vq_dim=args.vq_dim, codebook_size=args.codebook_size, row_group_size=args.vq_row_group_size
             )
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
@@ -449,6 +449,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--codebook_size', type=int, default=16,
         help='Size of the codebook for VQ.'
+    )
+    parser.add_argument(
+        '--vq_row_group_size', type=int, default=16,
+        help='Size of the row groups for VQ.'
     )
     args = parser.parse_args()
 

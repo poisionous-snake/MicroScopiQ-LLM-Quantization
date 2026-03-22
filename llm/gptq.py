@@ -191,13 +191,15 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
     
-    def vq(self, Q, mask, m, n, all_scales, group_size=4, k=16):
+    def vq(self, Q, mask, m, n, all_scales, group_size=4, k=16, row_group_size=1):
         """
         Q: 量化剪枝后的向量
         groups: scale
         group_size: VQ的分组大小
         k: VQ的码本大小
+        row_group_size: 相邻多少行共用一个VQ码本
         """
+        assert row_group_size > 0
         out_features, in_features = Q.shape[0], Q.shape[1] * Q.shape[2]
         device = Q.device
 
@@ -229,11 +231,12 @@ class GPTQ:
             print(f"Unique exponent delta patterns in groups: {len(unique_cnt_delta)}")
 
         exp_q = torch.empty_like(exp)
-        for row in range(out_features):
-            row_exp = exp[row]
-            row_man = man[row]
-            centroids, labels = topk_exp_vq(row_exp, row_man, k)
-            exp_q[row] = centroids[labels]
+        for row_start in range(0, out_features, row_group_size):
+            row_end = min(row_start + row_group_size, out_features)
+            block_exp = exp[row_start:row_end].reshape(-1, group_size)
+            block_man = man[row_start:row_end].reshape(-1, group_size)
+            centroids, labels = topk_exp_vq(block_exp, block_man, k)
+            exp_q[row_start:row_end] = centroids[labels].view(row_end - row_start, G, group_size)
 
         idx = (exp_q << 1) | man  # [out, G, d]
         lut = FP4_E2M1_LUT.to(device)  # [16]
@@ -250,7 +253,7 @@ class GPTQ:
         return val
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False, vq_dim=4, codebook_size=16
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False, vq_dim=4, codebook_size=16, row_group_size=1
     ):
         # 打印N:M
         if prunen != 0:
@@ -448,7 +451,7 @@ class GPTQ:
                 # ==================== EXPONENT VQ ====================
                 if groupsize != -1:
                     print("Applying exponent VQ...")
-                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size)
+                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
                 # ====================================================
 
                 W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
