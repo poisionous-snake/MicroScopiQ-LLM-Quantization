@@ -137,13 +137,13 @@ def topk_exp_vq(exp_g, man_g, k=16):
     # 这里使用简单的欧式距离或曼哈顿距离即可，或者直接在 Key 空间找最接近的值
     # 为了严谨，我们计算值空间距离 (类似于 K-means 的计算)
     
-    # # 扩展维度进行广播计算: [N, 1, d] vs [1, actual_k, d]
-    # dist = ((exp_g.unsqueeze(1).float() - centroids.unsqueeze(0).float()) ** 2).sum(-1)
-    # === +man LUT DIST ===
-    LUT = FP4_E2M1_LUT.to(exp_g.device) # [16]
-    val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
-    val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
-    dist = ((val_real - val_c)**2).sum(-1)
+    # 扩展维度进行广播计算: [N, 1, d] vs [1, actual_k, d]
+    dist = ((exp_g.unsqueeze(1).float() - centroids.unsqueeze(0).float()) ** 2).sum(-1)
+    # # === +man LUT DIST ===
+    # LUT = FP4_E2M1_LUT.to(exp_g.device) # [16]
+    # val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
+    # val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
+    # dist = ((val_real - val_c)**2).sum(-1)
     labels = dist.argmin(dim=1)
 
     return centroids, labels
