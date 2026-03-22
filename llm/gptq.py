@@ -67,7 +67,7 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
     centroids = unique_exp[idx].float() # [k, d]
 
     for _ in range(iters):
-        dist = ((exp_g.unsqueeze(1) - centroids.unsqueeze(0)) ** 2).sum(-1)  # [N, k]
+        dist = ((2 ** (exp_g.unsqueeze(1) - 1)  - 2 ** (centroids.unsqueeze(0) - 1)) ** 2).sum(-1)  # [N, k]
 
         labels = dist.argmin(dim=1)         # [N]
 
