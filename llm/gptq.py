@@ -228,16 +228,12 @@ class GPTQ:
             print(f"Unique exponent patterns in groups: {len(unique_cnt)}")
             print(f"Unique exponent delta patterns in groups: {len(unique_cnt_delta)}")
 
-        # === reshape ===
-        X_exp = exp.reshape(-1, group_size)
-        X_man = man.reshape(-1, group_size)
-
-        # === K-means ===
-        centroids, labels = topk_exp_vq(X_exp, X_man, k)
-        print("Number of unique centroids:", len(centroids))
-        # === 重建 ===
-        X_q = centroids[labels]
-        exp_q = X_q.view(out_features, G, group_size)
+        exp_q = torch.empty_like(exp)
+        for row in range(out_features):
+            row_exp = exp[row]
+            row_man = man[row]
+            centroids, labels = topk_exp_vq(row_exp, row_man, k)
+            exp_q[row] = centroids[labels]
 
         idx = (exp_q << 1) | man  # [out, G, d]
         lut = FP4_E2M1_LUT.to(device)  # [16]
