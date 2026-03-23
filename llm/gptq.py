@@ -148,6 +148,21 @@ def topk_exp_vq(exp_g, man_g, k=16):
 
     return centroids, labels
 
+def topk_value_vq(val_g, k=16):
+    """
+    val_g: [N, d] 完整FP4 value张量
+    k: 码本大小 (Top-K 模式数量)
+    """
+    unique_vals, counts = torch.unique(val_g, dim=0, return_counts=True)
+    actual_k = min(k, unique_vals.size(0))
+    _, topk_indices = torch.topk(counts, actual_k)
+    centroids = unique_vals[topk_indices]
+
+    dist = ((val_g.unsqueeze(1) - centroids.unsqueeze(0)) ** 2).sum(-1)
+    labels = dist.argmin(dim=1)
+
+    return centroids, labels
+
 class GPTQ:
 
     def __init__(self, layer):
@@ -213,39 +228,23 @@ class GPTQ:
         )
         print(x[:4][:24])
 
-        # 分解到FP4比特
+        # 规范化到离散 FP4 value，避免浮点误差影响模式匹配
         sign, exp, man = fp4_e2m1_decompose(x)
+        idx = (exp << 1) | man
+        lut = FP4_E2M1_LUT.to(device)
+        x = lut[idx]
+        x = torch.where(sign.bool(), -x, x)
 
-        print("G:", G)
-        for rows in range(min(4, out_features)):
-            x = exp[rows]
-            cnt = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            cnt_delta = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            for i in range(G):
-                cnt[i] = x[i, 0] + x[i, 1] * 4 + x[i, 2] * 16 + x[i, 3] * 64
-                cnt_delta[i] = x[i, 0] + (x[i, 1] - x[i, 0]) * 4 + (x[i, 2] - x[i, 1]) * 16 + (x[i, 3] - x[i, 2]) * 64
-            # 统计cnt中的unique格式
-            unique_cnt = torch.unique(cnt)
-            unique_cnt_delta = torch.unique(cnt_delta)
-            print(f"Unique exponent patterns in groups: {len(unique_cnt)}")
-            print(f"Unique exponent delta patterns in groups: {len(unique_cnt_delta)}")
-
-        exp_q = torch.empty_like(exp)
+        val_q = torch.empty_like(x)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
-            block_exp = exp[row_start:row_end].reshape(-1, group_size)
-            block_man = man[row_start:row_end].reshape(-1, group_size)
-            centroids, labels = topk_exp_vq(block_exp, block_man, k)
-            exp_q[row_start:row_end] = centroids[labels].view(row_end - row_start, G, group_size)
-
-        idx = (exp_q << 1) | man  # [out, G, d]
-        lut = FP4_E2M1_LUT.to(device)  # [16]
-        val = lut[idx]  # 正数
-        val = torch.where(sign.bool(), -val, val)
+            block_val = x[row_start:row_end].reshape(-1, group_size)
+            centroids, labels = topk_value_vq(block_val, k)
+            val_q[row_start:row_end] = centroids[labels].view(row_end - row_start, G, group_size)
 
         # 重构为sparse格式
         sparse_val = torch.zeros((out_features, in_features), device=device)
-        sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
+        sparse_val.masked_scatter_(mask.view(out_features, in_features), val_q.reshape(out_features, -1))
         val = sparse_val * all_scales.reshape(out_features, in_features)
 
         print(sparse_val[:4][:32])
@@ -448,11 +447,11 @@ class GPTQ:
                 replacement = torch.where(pos_mask, epsilon, replacement)
                 replacement = torch.where(neg_mask, -epsilon, replacement)
 
-                # ==================== EXPONENT VQ ====================
+                # ==================== FP4 VALUE VQ ====================
                 if groupsize != -1:
-                    print("Applying exponent VQ...")
+                    print("Applying FP4 value VQ...")
                     W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
-                # ====================================================
+                # =====================================================
 
                 W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
 
