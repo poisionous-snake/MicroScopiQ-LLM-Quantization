@@ -62,7 +62,7 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
 
     # === 初始化 centroid（从数据中采样）===
     unique_exp = torch.unique(exp_g, dim=0) # [U, d]
-    print(f"Unique exponent patterns: {unique_exp.shape[0]}")
+    # print(f"Unique exponent patterns: {unique_exp.shape[0]}")
     idx = torch.randperm(unique_exp.shape[0])[:k]
     centroids = unique_exp[idx].float() # [k, d]
 
@@ -110,7 +110,7 @@ def topk_exp_vq(exp_g, man_g, k=16):
     # 这样可以将 [N, d] 的向量转换为 [N] 的一维整数，方便统计频率
     keys = torch.zeros(N, device=device, dtype=torch.long)
     for i in range(d):
-        keys += exp_g[:, i].long() * (4 ** (d - 1 - i))
+        keys += exp_g[:, i].long() * (4 ** (d - 1 - i)) # TODO: hard coded 4 represents fp4
 
     # 2. 统计所有模式出现的频率
     unique_keys, counts = torch.unique(keys, return_counts=True)
@@ -211,32 +211,27 @@ class GPTQ:
         x = fp4_val.masked_select(mask).view(
             out_features, G, group_size
         )
-        print(x[:4][:24])
 
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
 
-        print("G:", G)
-        for rows in range(min(4, out_features)):
-            x = exp[rows]
-            cnt = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            cnt_delta = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            for i in range(G):
-                cnt[i] = x[i, 0] + x[i, 1] * 4 + x[i, 2] * 16 + x[i, 3] * 64
-                cnt_delta[i] = x[i, 0] + (x[i, 1] - x[i, 0]) * 4 + (x[i, 2] - x[i, 1]) * 16 + (x[i, 3] - x[i, 2]) * 64
-            # 统计cnt中的unique格式
-            unique_cnt = torch.unique(cnt)
-            unique_cnt_delta = torch.unique(cnt_delta)
-            print(f"Unique exponent patterns in groups: {len(unique_cnt)}")
-            print(f"Unique exponent delta patterns in groups: {len(unique_cnt_delta)}")
+        # Split G into 4 sub-groups and run VQ independently per sub-group.
+        vq_subgroups = 4
+        if G % vq_subgroups != 0:
+            raise ValueError(f"G={G} is not divisible by vq_subgroups={vq_subgroups}")
+        subgroup_size = G // vq_subgroups
 
         exp_q = torch.empty_like(exp)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
-            block_exp = exp[row_start:row_end].reshape(-1, group_size)
-            block_man = man[row_start:row_end].reshape(-1, group_size)
-            centroids, labels = topk_exp_vq(block_exp, block_man, k)
-            exp_q[row_start:row_end] = centroids[labels].view(row_end - row_start, G, group_size)
+            for g_start in range(0, G, subgroup_size):
+                g_end = g_start + subgroup_size
+                block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
+                block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
+                centroids, labels = topk_exp_vq(block_exp, block_man, k)
+                exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
+                    row_end - row_start, subgroup_size, group_size
+                )
 
         idx = (exp_q << 1) | man  # [out, G, d]
         lut = FP4_E2M1_LUT.to(device)  # [16]
@@ -247,8 +242,6 @@ class GPTQ:
         sparse_val = torch.zeros((out_features, in_features), device=device)
         sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
         val = sparse_val * all_scales.reshape(out_features, in_features)
-
-        print(sparse_val[:4][:32])
 
         return val
 
