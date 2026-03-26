@@ -53,37 +53,67 @@ def fp4_e2m1_decompose(tensor):
 def fp4_bits_to_str(sign, exp, man):
     return f"{sign}-{exp:02b}-{man}"
 
+def _exp_lut_dist(exp_g, man_g, centroids):
+    LUT = FP4_E2M1_LUT.to(exp_g.device)
+    val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
+    val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)]
+    return ((val_real - val_c) ** 2).sum(-1)
+
+def _kmeanspp_init_exp(exp_g, man_g, k):
+    unique_exp = torch.unique(exp_g, dim=0)
+    # print(f"Unique exponent patterns: {unique_exp.shape[0]}")
+
+    actual_k = min(k, unique_exp.shape[0])
+    if actual_k == 0:
+        raise ValueError("kmeans_exp_vq received no exponent patterns.")
+
+    first_idx = torch.randint(unique_exp.shape[0], (1,), device=exp_g.device)
+    centroids = [unique_exp[first_idx.item()].float()]
+
+    if actual_k == 1:
+        return torch.stack(centroids)
+
+    unique_man = torch.zeros_like(unique_exp, device=man_g.device)
+
+    while len(centroids) < actual_k:
+        current = torch.stack(centroids)
+        dist = _exp_lut_dist(unique_exp, unique_man, current)
+        min_dist = dist.amin(dim=1)
+
+        # Avoid reselection once a unique pattern is already used as a centroid.
+        chosen_mask = (unique_exp.unsqueeze(1) == current.long().unsqueeze(0)).all(dim=-1).any(dim=1)
+        min_dist = min_dist.masked_fill(chosen_mask, 0)
+
+        total = min_dist.sum()
+        if total <= 0:
+            remaining_idx = torch.nonzero(~chosen_mask, as_tuple=False).squeeze(-1)
+            next_idx = remaining_idx[torch.randint(remaining_idx.numel(), (1,), device=exp_g.device)].item()
+        else:
+            probs = min_dist / total
+            next_idx = torch.multinomial(probs, 1).item()
+
+        centroids.append(unique_exp[next_idx].float())
+
+    return torch.stack(centroids)
+
 def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
     """
     exp_g: [N, d]
     man_g: [N, d]
     """
-    N = exp_g.shape[0]
-
-    # === 初始化 centroid（从数据中采样）===
-    unique_exp = torch.unique(exp_g, dim=0) # [U, d]
-    print(f"Unique exponent patterns: {unique_exp.shape[0]}")
-    idx = torch.randperm(unique_exp.shape[0])[:k]
-    centroids = unique_exp[idx].float() # [k, d]
+    # === K-Means++ 初始化 centroid（sklearn 默认思路）===
+    centroids = _kmeanspp_init_exp(exp_g, man_g, k)
+    actual_k = centroids.shape[0]
 
     for _ in range(iters):
-        # # === SIMPLEST DIST ===
-        # dist = ((exp_g.unsqueeze(1) - centroids.unsqueeze(0)) ** 2).sum(-1)  # [N, k]
-        
-        # # === 2^exp DIST ===
-        # dist = ((2 ** (exp_g.unsqueeze(1) - 1)  - 2 ** (centroids.unsqueeze(0) - 1)) ** 2).sum(-1)  # [N, k]
-        
         # === +man LUT DIST ===
-        LUT = FP4_E2M1_LUT.to(exp_g.device) # [16]
-        val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
-        val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
-        dist = ((val_real - val_c)**2).sum(-1)
+        dist = _exp_lut_dist(exp_g, man_g, centroids)
 
         labels = dist.argmin(dim=1)         # [N]
 
         # ===== update =====
         new_centroids = []
-        for i in range(k):
+        for i in range(actual_k):
             mask = (labels == i) # 找到属于第 i 类的所有样本
             if mask.sum() == 0: # 如果该类没有样本
                 new_centroids.append(centroids[i])
@@ -211,31 +241,17 @@ class GPTQ:
         x = fp4_val.masked_select(mask).view(
             out_features, G, group_size
         )
-        print(x[:4][:24])
+        # print(x[:4][:24])
 
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
-
-        print("G:", G)
-        for rows in range(min(4, out_features)):
-            x = exp[rows]
-            cnt = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            cnt_delta = torch.zeros(G, device=exp.device, dtype=torch.int32)
-            for i in range(G):
-                cnt[i] = x[i, 0] + x[i, 1] * 4 + x[i, 2] * 16 + x[i, 3] * 64
-                cnt_delta[i] = x[i, 0] + (x[i, 1] - x[i, 0]) * 4 + (x[i, 2] - x[i, 1]) * 16 + (x[i, 3] - x[i, 2]) * 64
-            # 统计cnt中的unique格式
-            unique_cnt = torch.unique(cnt)
-            unique_cnt_delta = torch.unique(cnt_delta)
-            print(f"Unique exponent patterns in groups: {len(unique_cnt)}")
-            print(f"Unique exponent delta patterns in groups: {len(unique_cnt_delta)}")
 
         exp_q = torch.empty_like(exp)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
             block_exp = exp[row_start:row_end].reshape(-1, group_size)
             block_man = man[row_start:row_end].reshape(-1, group_size)
-            centroids, labels = topk_exp_vq(block_exp, block_man, k)
+            centroids, labels = kmeans_exp_vq(block_exp, block_man, k)
             exp_q[row_start:row_end] = centroids[labels].view(row_end - row_start, G, group_size)
 
         idx = (exp_q << 1) | man  # [out, G, d]
@@ -248,7 +264,7 @@ class GPTQ:
         sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
         val = sparse_val * all_scales.reshape(out_features, in_features)
 
-        print(sparse_val[:4][:32])
+        # print(sparse_val[:4][:32])
 
         return val
 
