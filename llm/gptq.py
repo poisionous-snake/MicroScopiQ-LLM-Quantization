@@ -215,22 +215,21 @@ class GPTQ:
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
 
-        # Split G into 4 sub-groups and run VQ independently per sub-group.
-        vq_subgroups = 4
-        if G % vq_subgroups != 0:
-            raise ValueError(f"G={G} is not divisible by vq_subgroups={vq_subgroups}")
-        subgroup_size = G // vq_subgroups
+        # Split G into fixed-size sub-groups and run VQ independently per sub-group.
+        vq_group_span = 36
+        if G % vq_group_span != 0:
+            raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
 
         exp_q = torch.empty_like(exp)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
-            for g_start in range(0, G, subgroup_size):
-                g_end = g_start + subgroup_size
+            for g_start in range(0, G, vq_group_span):
+                g_end = g_start + vq_group_span
                 block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
                 block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
                 centroids, labels = topk_exp_vq(block_exp, block_man, k)
                 exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
-                    row_end - row_start, subgroup_size, group_size
+                    row_end - row_start, vq_group_span, group_size
                 )
 
         idx = (exp_q << 1) | man  # [out, G, d]
