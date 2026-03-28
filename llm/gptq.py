@@ -4,6 +4,7 @@ import time
 import torch
 import torch.nn as nn
 import transformers
+from sklearn.cluster import KMeans
 import sys
 sys.path.append("../")
 from utils.quant import *
@@ -104,46 +105,30 @@ def topk_exp_vq(exp_g, man_g, k=16):
     k: 码本大小 (Top-K 模式数量)
     """
     device = exp_g.device
-    N, d = exp_g.shape
+    exp_cpu = exp_g.detach().to(torch.float32).cpu()
+    unique_exp = torch.unique(exp_cpu, dim=0)
+    actual_k = min(k, exp_cpu.shape[0], unique_exp.shape[0])
 
-    # 1. 将 d 维指数映射为唯一的 Key (假设指数范围 0-3, 即 2 bits)
-    # 这样可以将 [N, d] 的向量转换为 [N] 的一维整数，方便统计频率
-    keys = torch.zeros(N, device=device, dtype=torch.long)
-    for i in range(d):
-        keys += exp_g[:, i].long() * (4 ** (d - 1 - i))
+    if actual_k == 0:
+        raise ValueError("topk_exp_vq received an empty exponent block.")
 
-    # 2. 统计所有模式出现的频率
-    unique_keys, counts = torch.unique(keys, return_counts=True)
-    
-    # 3. 选取出现次数最多的前 K 个模式作为码本
-    actual_k = min(k, unique_keys.size(0))
-    topk_counts, topk_indices = torch.topk(counts, actual_k)
-    codebook_keys = unique_keys[topk_indices]
+    if actual_k == 1:
+        centroids = unique_exp[:1].round().clamp(0, 3).to(device=device, dtype=torch.long)
+        labels = torch.zeros(exp_g.shape[0], device=device, dtype=torch.long)
+        return centroids, labels
 
-    # 4. 将选中的 Key 还原为 d 维指数向量 (Centroids)
-    centroids = []
-    for key in codebook_keys:
-        pattern = []
-        tmp = key.item()
-        for _ in range(d):
-            pattern.append(tmp % 4)
-            tmp //= 4
-        centroids.append(pattern[::-1])
-    
-    centroids = torch.tensor(centroids, device=device, dtype=torch.long) # [actual_k, d]
+    kmeans = KMeans(
+        n_clusters=actual_k,
+        random_state=0,
+        n_init=10,
+    )
+    kmeans.fit(exp_cpu.numpy())
 
-    # 5. 分配 (Assignment): 将原始数据映射到最近的码本项
-    # 由于指数是离散的，我们直接计算每个样本 keys 与 codebook_keys 的距离
-    # 这里使用简单的欧式距离或曼哈顿距离即可，或者直接在 Key 空间找最接近的值
-    # 为了严谨，我们计算值空间距离 (类似于 K-means 的计算)
-    
-    # 扩展维度进行广播计算: [N, 1, d] vs [1, actual_k, d]
+    centroids = torch.from_numpy(kmeans.cluster_centers_).to(device=device)
+    centroids = centroids.round().clamp(0, 3).to(torch.long)
+
+    # KMeans 聚类中心是连续值，离散化后重新分配一次，确保 labels 与最终码本一致。
     dist = ((exp_g.unsqueeze(1).float() - centroids.unsqueeze(0).float()) ** 2).sum(-1)
-    # # === +man LUT DIST ===
-    # LUT = FP4_E2M1_LUT.to(exp_g.device) # [16]
-    # val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
-    # val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
-    # dist = ((val_real - val_c)**2).sum(-1)
     labels = dist.argmin(dim=1)
 
     return centroids, labels
