@@ -248,7 +248,7 @@ class GPTQ:
         )
 
         # ===== 新增：Hessian 对齐到 dense =====
-        H_diag = torch.diag(self.H) if hasattr(self, "H") else None
+        H_diag = self.H_diag
 
         if H_diag is not None:
             mask_flat = mask.view(out_features, -1)
@@ -321,6 +321,7 @@ class GPTQ:
 
         H = self.H
         H_diag = torch.diag(H).clone()
+        self.H_diag = H_diag
         del self.H
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
