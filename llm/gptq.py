@@ -2,6 +2,7 @@ import math
 import time
 
 import torch
+import numpy as np
 import torch.nn as nn
 import transformers
 from sklearn.cluster import KMeans
@@ -95,6 +96,55 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
         centroids = torch.stack(new_centroids)
 
         # 离散化回 0~3
+        centroids = centroids.round().clamp(0, 3)
+
+    return centroids.long(), labels
+
+def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
+    """
+    exp_g: [N, d]
+    H_weight: [N, d]  (element-wise Hessian weight)
+    """
+    device = exp_g.device
+    N, d = exp_g.shape
+
+    # init
+    idx = torch.randperm(N, device=device)[:k]
+    centroids = exp_g[idx].float()
+
+    for _ in range(iters):
+
+        # ===== assignment =====
+        # diff = exp_g.unsqueeze(1).float() - centroids.unsqueeze(0)
+
+        LUT = FP4_E2M1_LUT.to(exp_g.device)
+
+        val_real = LUT[(exp_g.long() << 1)]
+        val_c = LUT[(centroids.long().unsqueeze(0) << 1)]
+
+        diff = val_real.unsqueeze(1) - val_c
+
+        if H_weight is not None:
+            dist = (diff ** 2 * H_weight.unsqueeze(1)).sum(-1)
+        else:
+            dist = (diff ** 2).sum(-1)
+
+        labels = dist.argmin(dim=1)
+
+        # ===== vectorized update（关键优化版）=====
+        centroids_new = torch.zeros_like(centroids)
+        weight_sum = torch.zeros_like(centroids)
+
+        for j in range(d):
+            wj = H_weight[:, j] if H_weight is not None else torch.ones(N, device=device)
+
+            centroids_new[:, j].index_add_(0, labels, exp_g[:, j].float() * wj)
+            weight_sum[:, j].index_add_(0, labels, wj)
+
+        mask = weight_sum > 0
+        centroids[mask] = centroids_new[mask] / weight_sum[mask]
+
+        # 离散化
         centroids = centroids.round().clamp(0, 3)
 
     return centroids.long(), labels
@@ -197,6 +247,17 @@ class GPTQ:
             out_features, G, group_size
         )
 
+        # ===== 新增：Hessian 对齐到 dense =====
+        H_diag = torch.diag(self.H) if hasattr(self, "H") else None
+
+        if H_diag is not None:
+            mask_flat = mask.view(out_features, -1)
+            col_idx = mask_flat.nonzero(as_tuple=False)[:, 1]
+            col_idx = col_idx.view(out_features, G, group_size)
+            H_dense = H_diag[col_idx]  # [out_features, G, group_size]
+        else:
+            H_dense = None
+
         # 分解到FP4比特
         sign, exp, man = fp4_e2m1_decompose(x)
 
@@ -211,8 +272,15 @@ class GPTQ:
             for g_start in range(0, G, vq_group_span):
                 g_end = g_start + vq_group_span
                 block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
-                block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
-                centroids, labels = topk_exp_vq(block_exp, block_man, k)
+                # block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
+                block_H = H_dense[row_start:row_end, g_start:g_end, :]
+                block_H = block_H.reshape(-1, group_size)
+                centroids, labels = weighted_kmeans_exp_v2(
+                    block_exp,
+                    k=k,
+                    H_weight=block_H,
+                    iters=5
+                )
                 exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
                     row_end - row_start, vq_group_span, group_size
                 )
