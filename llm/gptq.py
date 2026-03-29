@@ -147,7 +147,7 @@ def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
     return centroids
 
 
-def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
+def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
     """
     exp_g: [N, d]
     H_weight: [N, d]  (element-wise Hessian weight)
@@ -156,9 +156,22 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
     N, d = exp_g.shape
 
     LUT = FP4_E2M1_LUT.to(exp_g.device)
+
+    # ===== [NEW] 融合 scale 到 H =====
+    if scale is not None:
+        # scale: [N, 1] 或 [N, d]
+        if scale.dim() == 2 and scale.shape[1] == 1:
+            scale = scale.expand_as(exp_g)   # broadcast到每个元素
+
+        if H_weight is not None:
+            H_eff = H_weight * (scale ** 2)
+        else:
+            H_eff = scale ** 2
+    else:
+        H_eff = H_weight
     
     # ===== KMeans++ 初始化（替换原 random init）=====
-    centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_weight)
+    centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff)
 
     for _ in range(iters):
         val_real = LUT[(exp_g.long() << 1)]
@@ -166,8 +179,8 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
 
         diff = val_real.unsqueeze(1) - val_c
 
-        if H_weight is not None:
-            dist = (diff ** 2 * H_weight.unsqueeze(1)).sum(-1)
+        if H_eff is not None:
+            dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
         else:
             dist = (diff ** 2).sum(-1)
 
@@ -178,7 +191,7 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
         weight_sum = torch.zeros_like(centroids)
 
         for j in range(d):
-            wj = H_weight[:, j] if H_weight is not None else torch.ones(N, device=device)
+            wj = H_eff[:, j] if H_eff is not None else torch.ones(N, device=device)
 
             centroids_new[:, j].index_add_(0, labels, exp_g[:, j].float() * wj)
             weight_sum[:, j].index_add_(0, labels, wj)
@@ -297,6 +310,10 @@ class GPTQ:
             col_idx = mask_flat.nonzero(as_tuple=False)[:, 1]
             col_idx = col_idx.view(out_features, G, group_size)
             H_dense = H_diag[col_idx]  # [out_features, G, group_size]
+            # ===== [NEW] scale 对齐到 dense =====
+            scale_dense = all_scales.masked_select(mask).view(
+                out_features, G, group_size
+            )
         else:
             H_dense = None
 
@@ -317,10 +334,18 @@ class GPTQ:
                 # block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
                 block_H = H_dense[row_start:row_end, g_start:g_end, :]
                 block_H = block_H.reshape(-1, group_size)
+
+                # ===== [NEW] block scale =====
+                block_scale = scale_dense[row_start:row_end, g_start:g_end, :]
+                block_scale = block_scale.reshape(-1, group_size)
+                # group内scale相同 → 取一列即可
+                block_scale = block_scale[:, :1]   # [N, 1]
+
                 centroids, labels = weighted_kmeans_exp_v2(
                     block_exp,
                     k=k,
                     H_weight=block_H,
+                    scale = block_scale,
                     iters=5
                 )
                 exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
