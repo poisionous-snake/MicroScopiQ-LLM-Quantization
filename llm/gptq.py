@@ -100,6 +100,53 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
 
     return centroids.long(), labels
 
+def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
+    """
+    exp_g: [N, d]
+    返回: 初始 centroids [k, d]
+    """
+    device = exp_g.device
+    N, d = exp_g.shape
+
+    # 转真实值空间（和你原算法一致）
+    val_real = LUT[(exp_g.long() << 1)].float()
+
+    centroids = torch.empty((k, d), device=device)
+
+    # 1️⃣ 随机选第一个
+    idx = torch.randint(0, N, (1,), device=device)
+    centroids[0] = exp_g[idx]
+
+    # 记录每个点到最近centroid的距离
+    closest_dist = None
+
+    for i in range(1, k):
+
+        val_c = LUT[(centroids[:i].long().unsqueeze(0) << 1)]
+
+        diff = val_real.unsqueeze(1) - val_c
+        if H_weight is not None:
+            dist = (diff ** 2 * H_weight.unsqueeze(1)).sum(-1)
+        else:
+            dist = (diff ** 2).sum(-1)
+
+        min_dist, _ = dist.min(dim=1)
+
+        if closest_dist is None:
+            closest_dist = min_dist
+        else:
+            closest_dist = torch.minimum(closest_dist, min_dist)
+
+        # 2️⃣ 按距离^2采样
+        prob = closest_dist + 1e-8
+        prob = prob / prob.sum()
+
+        idx = torch.multinomial(prob, 1)
+        centroids[i] = exp_g[idx]
+
+    return centroids
+
+
 def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
     """
     exp_g: [N, d]
@@ -108,17 +155,12 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, iters=5):
     device = exp_g.device
     N, d = exp_g.shape
 
-    # init
-    idx = torch.randperm(N, device=device)[:k]
-    centroids = exp_g[idx].float()
+    LUT = FP4_E2M1_LUT.to(exp_g.device)
+    
+    # ===== KMeans++ 初始化（替换原 random init）=====
+    centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_weight)
 
     for _ in range(iters):
-
-        # ===== assignment =====
-        # diff = exp_g.unsqueeze(1).float() - centroids.unsqueeze(0)
-
-        LUT = FP4_E2M1_LUT.to(exp_g.device)
-
         val_real = LUT[(exp_g.long() << 1)]
         val_c = LUT[(centroids.long().unsqueeze(0) << 1)]
 
