@@ -29,6 +29,44 @@ FP4_E2M1_LUT = torch.tensor(
      6.0]   # E=11 M=1
 )
 
+# FP8(E4M3) hardcoded LUT (positive values only)
+# index = (exponent << 3) | mantissa
+# Exponent bias = 7, range -7 to 8
+FP8_E4M3_LUT = torch.tensor([
+    # exp=0 (2^-7)
+    0.0078125, 0.0087890625, 0.009765625, 0.0107421875, 0.01171875, 0.0126953125, 0.013671875, 0.0146484375,
+    # exp=1 (2^-6)
+    0.015625, 0.017578125, 0.01953125, 0.021484375, 0.0234375, 0.025390625, 0.02734375, 0.029296875,
+    # exp=2 (2^-5)
+    0.03125, 0.03515625, 0.0390625, 0.04296875, 0.046875, 0.05078125, 0.0546875, 0.05859375,
+    # exp=3 (2^-4)
+    0.0625, 0.0703125, 0.078125, 0.0859375, 0.09375, 0.1015625, 0.109375, 0.1171875,
+    # exp=4 (2^-3)
+    0.125, 0.140625, 0.15625, 0.171875, 0.1875, 0.203125, 0.21875, 0.234375,
+    # exp=5 (2^-2)
+    0.25, 0.28125, 0.3125, 0.34375, 0.375, 0.40625, 0.4375, 0.46875,
+    # exp=6 (2^-1)
+    0.5, 0.5625, 0.625, 0.6875, 0.75, 0.8125, 0.875, 0.9375,
+    # exp=7 (2^0)
+    1.0, 1.125, 1.25, 1.375, 1.5, 1.625, 1.75, 1.875,
+    # exp=8 (2^1)
+    2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75,
+    # exp=9 (2^2)
+    4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5,
+    # exp=10 (2^3)
+    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+    # exp=11 (2^4)
+    16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0,
+    # exp=12 (2^5)
+    32.0, 36.0, 40.0, 44.0, 48.0, 52.0, 56.0, 60.0,
+    # exp=13 (2^6)
+    64.0, 72.0, 80.0, 88.0, 96.0, 104.0, 112.0, 120.0,
+    # exp=14 (2^7)
+    128.0, 144.0, 160.0, 176.0, 192.0, 208.0, 224.0, 240.0,
+    # exp=15 (2^8)
+    256.0, 288.0, 320.0, 352.0, 384.0, 416.0, 448.0, 480.0,
+])
+
 def fp4_e2m1_decompose(tensor):
     """
     Hardcoded FP4(E2M1) decomposition.
@@ -49,6 +87,29 @@ def fp4_e2m1_decompose(tensor):
 
     exponent = (idx >> 1).view(x.shape)   # high bit
     mantissa = (idx & 1).view(x.shape)    # low bit
+
+    return sign, exponent, mantissa
+
+def fp8_e4m3_decompose(tensor):
+    """
+    Hardcoded FP8(E4M3) decomposition.
+    Returns: sign, exponent_bits (0–15), mantissa_bits (0–7)
+    """
+    x = tensor.clone()
+
+    # sign bit
+    sign = (x < 0).int()
+    x = x.abs()
+
+    # flatten for vectorized LUT match
+    x_flat = x.view(-1, 1)
+    lut = FP8_E4M3_LUT.to(x.device).view(1, -1)
+
+    # nearest FP8 value
+    idx = torch.argmin((x_flat - lut).abs(), dim=1)
+
+    exponent = (idx >> 3).view(x.shape)   # high 4 bits
+    mantissa = (idx & 7).view(x.shape)    # low 3 bits
 
     return sign, exponent, mantissa
 
@@ -76,9 +137,9 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
         # dist = ((2 ** (exp_g.unsqueeze(1) - 1)  - 2 ** (centroids.unsqueeze(0) - 1)) ** 2).sum(-1)  # [N, k]
         
         # === +man LUT DIST ===
-        LUT = FP4_E2M1_LUT.to(exp_g.device) # [16]
-        val_real = LUT[(exp_g.unsqueeze(1).long() << 1) | man_g.unsqueeze(1)]
-        val_c = LUT[(centroids.unsqueeze(0).long() << 1) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
+        LUT = FP8_E4M3_LUT.to(exp_g.device) # [128] # TODO：
+        val_real = LUT[(exp_g.unsqueeze(1).long() << 3) | man_g.unsqueeze(1)]
+        val_c = LUT[(centroids.unsqueeze(0).long() << 3) | man_g.unsqueeze(1)] # 结合原始尾数和质心指数
         dist = ((val_real - val_c)**2).sum(-1)
 
         labels = dist.argmin(dim=1)         # [N]
@@ -95,8 +156,8 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
 
         centroids = torch.stack(new_centroids)
 
-        # 离散化回 0~3
-        centroids = centroids.round().clamp(0, 3)
+        # 离散化回 0~15
+        centroids = centroids.round().clamp(0, 15)
 
     return centroids.long(), labels
 
@@ -109,7 +170,7 @@ def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
     N, d = exp_g.shape
 
     # 转真实值空间（和你原算法一致）
-    val_real = LUT[(exp_g.long() << 1)].float()
+    val_real = LUT[(exp_g.long() << 3)].float()
 
     centroids = torch.empty((k, d), device=device)
 
@@ -122,7 +183,7 @@ def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
 
     for i in range(1, k):
 
-        val_c = LUT[(centroids[:i].long().unsqueeze(0) << 1)]
+        val_c = LUT[(centroids[:i].long().unsqueeze(0) << 3)]
 
         diff = val_real.unsqueeze(1) - val_c
         if H_weight is not None:
@@ -155,7 +216,7 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
     device = exp_g.device
     N, d = exp_g.shape
 
-    LUT = FP4_E2M1_LUT.to(exp_g.device)
+    LUT = FP8_E4M3_LUT.to(exp_g.device)
 
     # ===== [NEW] 融合 scale 到 H =====
     if scale is not None:
@@ -174,8 +235,8 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
     centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff)
 
     for _ in range(iters):
-        val_real = LUT[(exp_g.long() << 1)]
-        val_c = LUT[(centroids.long().unsqueeze(0) << 1)]
+        val_real = LUT[(exp_g.long() << 3)]
+        val_c = LUT[(centroids.long().unsqueeze(0) << 3)]
 
         diff = val_real.unsqueeze(1) - val_c
 
@@ -200,43 +261,9 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
         centroids[mask] = centroids_new[mask] / weight_sum[mask]
 
         # 离散化
-        centroids = centroids.round().clamp(0, 3)
+        centroids = centroids.round().clamp(0, 15)
 
     return centroids.long(), labels
-
-def topk_exp_vq(exp_g, man_g, k=16):
-    """
-    exp_g: [N, d] 原始指数张量
-    k: 码本大小 (Top-K 模式数量)
-    """
-    device = exp_g.device
-    exp_cpu = exp_g.detach().to(torch.float32).cpu()
-    unique_exp = torch.unique(exp_cpu, dim=0)
-    actual_k = min(k, exp_cpu.shape[0], unique_exp.shape[0])
-
-    if actual_k == 0:
-        raise ValueError("topk_exp_vq received an empty exponent block.")
-
-    if actual_k == 1:
-        centroids = unique_exp[:1].round().clamp(0, 3).to(device=device, dtype=torch.long)
-        labels = torch.zeros(exp_g.shape[0], device=device, dtype=torch.long)
-        return centroids, labels
-
-    kmeans = KMeans(
-        n_clusters=actual_k,
-        random_state=0,
-        n_init=10,
-    )
-    kmeans.fit(exp_cpu.numpy())
-
-    centroids = torch.from_numpy(kmeans.cluster_centers_).to(device=device)
-    centroids = centroids.round().clamp(0, 3).to(torch.long)
-
-    # KMeans 聚类中心是连续值，离散化后重新分配一次，确保 labels 与最终码本一致。
-    dist = ((exp_g.unsqueeze(1).float() - centroids.unsqueeze(0).float()) ** 2).sum(-1)
-    labels = dist.argmin(dim=1)
-
-    return centroids, labels
 
 class GPTQ:
 
@@ -317,8 +344,8 @@ class GPTQ:
         else:
             H_dense = None
 
-        # 分解到FP4比特
-        sign, exp, man = fp4_e2m1_decompose(x)
+        # 分解到FP8比特
+        sign, exp, man = fp8_e4m3_decompose(x)
 
         # Split G into fixed-size sub-groups and run VQ independently per sub-group.
         vq_group_span = 36
@@ -352,8 +379,8 @@ class GPTQ:
                     row_end - row_start, vq_group_span, group_size
                 )
 
-        idx = (exp_q << 1) | man  # [out, G, d]
-        lut = FP4_E2M1_LUT.to(device)  # [16]
+        idx = (exp_q << 3) | man  # [out, G, d]
+        lut = FP8_E4M3_LUT.to(device)  # [128]
         val = lut[idx]  # 正数
         val = torch.where(sign.bool(), -val, val)
 
@@ -470,148 +497,160 @@ class GPTQ:
             Q = Q[:, invperm]
         
         # ==================== 修改部分：N:M 结构化剪枝 ====================
-        if prunen != 0 and prunem != 0:
-            print(f"Applying post-quantization wanda {prunen}:{prunem} pruning.")
-            out_features, in_features = Q.shape
+        # if prunen != 0 and prunem != 0:
+        #     print(f"Applying post-quantization wanda {prunen}:{prunem} pruning.")
+        #     out_features, in_features = Q.shape
 
-            act_norm = torch.sqrt(H_diag + 1e-8)  # shape: (in_features,)
-            if actorder:
-                act_norm = act_norm[invperm]
+        #     act_norm = torch.sqrt(H_diag + 1e-8)  # shape: (in_features,)
+        #     if actorder:
+        #         act_norm = act_norm[invperm]
 
-            W_metric = torch.abs(Q) * act_norm.view(1, -1)
+        #     W_metric = torch.abs(Q) * act_norm.view(1, -1)
             
-            # 针对 N:M，通常在输入特征维度（in_features）进行分组
-            if in_features % prunem == 0:
-                # 1. 重塑形状为 (out_features, 组数, M)
-                W_temp = Q.view(out_features, -1, prunem)
-                M_temp = W_metric.view(out_features, -1, prunem)
+        #     # 针对 N:M，通常在输入特征维度（in_features）进行分组
+        #     if in_features % prunem == 0:
+        #         # 1. 重塑形状为 (out_features, 组数, M)
+        #         W_temp = Q.view(out_features, -1, prunem)
+        #         M_temp = W_metric.view(out_features, -1, prunem)
 
-                # 2. 找到每组中绝对值最大的前 N 个元素的索引
-                # topk 会返回前 prunen 个最大值的索引
-                _, topk_indices = torch.topk(M_temp, prunen, dim=2, largest=True)
+        #         # 2. 找到每组中绝对值最大的前 N 个元素的索引
+        #         # topk 会返回前 prunen 个最大值的索引
+        #         _, topk_indices = torch.topk(M_temp, prunen, dim=2, largest=True)
                 
-                # 3. 创建掩码并应用
-                mask = torch.zeros_like(W_temp, dtype=torch.bool)
-                mask.scatter_(2, topk_indices, True)
+        #         # 3. 创建掩码并应用
+        #         mask = torch.zeros_like(W_temp, dtype=torch.bool)
+        #         mask.scatter_(2, topk_indices, True)
 
-                pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
+        #         pruned_elements = torch.where(~mask, W_temp, torch.zeros_like(W_temp))
 
-                """
-                # ============ MEAN ============
-                # # 4. 计算被剪掉部分的平均值
-                # pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
+        #         """
+        #         # ============ MEAN ============
+        #         # # 4. 计算被剪掉部分的平均值
+        #         # pruned_sum = torch.sum(pruned_elements, dim=2, keepdim=True)
 
-                # # 每组被剪掉元素的个数
-                # num_pruned = prunem - prunen
+        #         # # 每组被剪掉元素的个数
+        #         # num_pruned = prunem - prunen
 
-                # # 计算均值
-                # pruned_mean = pruned_sum / num_pruned
+        #         # # 计算均值
+        #         # pruned_mean = pruned_sum / num_pruned
                 
-                # # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
-                # W_final = torch.where(mask, W_temp, pruned_mean)
+        #         # # 5. 均值填充：Top-N 位置保留原值，非 Top-N 位置替换为均值
+        #         # W_final = torch.where(mask, W_temp, pruned_mean)
 
-                # ============ ZERO ============
-                # # 5. 0填充
-                # W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
+        #         # ============ ZERO ============
+        #         # # 5. 0填充
+        #         # W_final = torch.where(mask, W_temp, torch.zeros_like(W_temp))
 
-                # ============ ACTIVATION-AWARE REPLACEMENT ============
-                # # 4 activation-aware replacement
-                # act2 = act_norm.view(1, -1, prunem)
+        #         # ============ ACTIVATION-AWARE REPLACEMENT ============
+        #         # # 4 activation-aware replacement
+        #         # act2 = act_norm.view(1, -1, prunem)
 
-                # pruned = ~mask
+        #         # pruned = ~mask
 
-                # num = torch.sum(W_temp * act2 * pruned, dim=2, keepdim=True)
-                # den = torch.sum(act2 * pruned, dim=2, keepdim=True) + 1e-8 
+        #         # num = torch.sum(W_temp * act2 * pruned, dim=2, keepdim=True)
+        #         # den = torch.sum(act2 * pruned, dim=2, keepdim=True) + 1e-8 
 
-                # replacement = num / den
+        #         # replacement = num / den
 
-                # # 5 fill
-                # W_final = torch.where(mask, W_temp, replacement)
+        #         # # 5 fill
+        #         # W_final = torch.where(mask, W_temp, replacement)
 
-                # ============ SIGN-AWARE MEAN REPLACEMENT ============
-                # pos_mask = (pruned_elements > 0)
-                # neg_mask = (pruned_elements < 0)
-                # zero_mask = (pruned_elements == 0)
-                # pos_count = torch.sum(pos_mask, dim=2, keepdim=True).clamp(min=1)
-                # neg_count = torch.sum(neg_mask, dim=2, keepdim=True).clamp(min=1)
-                # pos_mean = torch.sum(W_temp * pos_mask, dim=2, keepdim=True) / pos_count
-                # neg_mean = torch.sum(W_temp * neg_mask, dim=2, keepdim=True) / neg_count
+        #         # ============ SIGN-AWARE MEAN REPLACEMENT ============
+        #         # pos_mask = (pruned_elements > 0)
+        #         # neg_mask = (pruned_elements < 0)
+        #         # zero_mask = (pruned_elements == 0)
+        #         # pos_count = torch.sum(pos_mask, dim=2, keepdim=True).clamp(min=1)
+        #         # neg_count = torch.sum(neg_mask, dim=2, keepdim=True).clamp(min=1)
+        #         # pos_mean = torch.sum(W_temp * pos_mask, dim=2, keepdim=True) / pos_count
+        #         # neg_mean = torch.sum(W_temp * neg_mask, dim=2, keepdim=True) / neg_count
 
-                # replacement = torch.zeros_like(W_temp)
-                # replacement = torch.where(pos_mask, pos_mean, replacement)
-                # replacement = torch.where(neg_mask, neg_mean, replacement)
+        #         # replacement = torch.zeros_like(W_temp)
+        #         # replacement = torch.where(pos_mask, pos_mean, replacement)
+        #         # replacement = torch.where(neg_mask, neg_mean, replacement)
 
-                # W_final = torch.where(mask, W_temp, replacement)
-                """
+        #         # W_final = torch.where(mask, W_temp, replacement)
+        #         """
 
-                # ============ SIGN-AWARE MEAN REPLACEMENT ============
-                replacement = torch.zeros_like(W_temp)
+        #         # ============ SIGN-AWARE MEAN REPLACEMENT ============
+        #         replacement = torch.zeros_like(W_temp)
 
-                pos_mask = ~mask & (pruned_elements > 0)
-                neg_mask = ~mask & (pruned_elements < 0)
+        #         pos_mask = ~mask & (pruned_elements > 0)
+        #         neg_mask = ~mask & (pruned_elements < 0)
 
-                all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
-                assert(all_scales.shape[0] == out_features)
-                assert(all_scales.shape[1] == (in_features // prunem))
-                all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
-                # FIXME: 
-                assert(prunem == groupsize)
-                epsilon = 0.5 * all_scales
+        #         all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
+        #         assert(all_scales.shape[0] == out_features)
+        #         assert(all_scales.shape[1] == (in_features // prunem))
+        #         all_scales = all_scales.unsqueeze(2).expand(-1, -1, prunem)
+        #         # FIXME: 
+        #         assert(prunem == groupsize)
+        #         epsilon = 0.5 * all_scales
 
-                replacement = torch.where(pos_mask, epsilon, replacement)
-                replacement = torch.where(neg_mask, -epsilon, replacement)
+        #         replacement = torch.where(pos_mask, epsilon, replacement)
+        #         replacement = torch.where(neg_mask, -epsilon, replacement)
 
-                # ==================== EXPONENT VQ ====================
-                if groupsize != -1:
-                    print("Applying exponent VQ...")
-                    W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
-                # ====================================================
+        #         # ==================== EXPONENT VQ ====================
+        #         if groupsize != -1:
+        #             print("Applying exponent VQ...")
+        #             W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
+        #         # ====================================================
 
-                W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
+        #         W_final = torch.where(mask, W_vq.view(out_features, -1, prunem), replacement)
 
-                # --- 新增：FP4 比特打印逻辑 (调试用) ---
-                if plot:
-                # 提取被剪枝位置（即 mask 为 False 的位置）的值
-                # 为了观察 FP4 比特，我们需要除以 scale 还原到量化空间
-                    current_scale = groups[0].scale
+        #         # --- 新增：FP4 比特打印逻辑 (调试用) ---
+        #         if plot:
+        #         # 提取被剪枝位置（即 mask 为 False 的位置）的值
+        #         # 为了观察 FP4 比特，我们需要除以 scale 还原到量化空间
+        #             current_scale = groups[0].scale
 
-                    if current_scale.dim() == 2:
-                        # 扩展 scale 维度到 (out_features, 1, 1) 以匹配 (out_features, groups, prunem)
-                        scale_reshaped = current_scale.unsqueeze(2)
-                    else:
-                        scale_reshaped = current_scale
+        #             if current_scale.dim() == 2:
+        #                 # 扩展 scale 维度到 (out_features, 1, 1) 以匹配 (out_features, groups, prunem)
+        #                 scale_reshaped = current_scale.unsqueeze(2)
+        #             else:
+        #                 scale_reshaped = current_scale
 
-                    # TODO: to plot original(not compensated) pruned weights, here should be W_temp
-                    fp4_query_vals = (W_temp / scale_reshaped)
+        #             # TODO: to plot original(not compensated) pruned weights, here should be W_temp
+        #             fp4_query_vals = (W_temp / scale_reshaped)
                     
-                    # 获取比特分解
-                    s, e, m = fp4_e2m1_decompose(fp4_query_vals)
+        #             # 获取比特分解
+        #             s, e, m = fp4_e2m1_decompose(fp4_query_vals)
                     
-                    print(f"\n[FP4 Bits for Pruned Elements (Replaced by Mean) | {prunen}:{prunem}]")
-                    # 打印前 32xM 范围内的结构
-                    rows_to_print = min(32, out_features)
-                    groups_to_print = W_final.shape[1]
+        #             print(f"\n[FP4 Bits for Pruned Elements (Replaced by Mean) | {prunen}:{prunem}]")
+        #             # 打印前 32xM 范围内的结构
+        #             rows_to_print = min(32, out_features)
+        #             groups_to_print = W_final.shape[1]
 
-                    for r in range(rows_to_print):
-                        group_bits = []
-                        for i in range(prunem):
-                            is_topn = mask[r, 0, i]
-                            if not is_topn:
-                                # 被剪枝的位置，现在显示的是均值的 FP4 比特
-                                bitstr = f"{s[r, 0, i].item()}-{e[r, 0, i].item():02b}-{m[r, 0, i].item()}"
-                                group_bits.append(f"{bitstr}")
-                            else:
-                                # 保留的 Top-N 位置
-                                group_bits.append("   .  ")
+        #             for r in range(rows_to_print):
+        #                 group_bits = []
+        #                 for i in range(prunem):
+        #                     is_topn = mask[r, 0, i]
+        #                     if not is_topn:
+        #                         # 被剪枝的位置，现在显示的是均值的 FP4 比特
+        #                         bitstr = f"{s[r, 0, i].item()}-{e[r, 0, i].item():02b}-{m[r, 0, i].item()}"
+        #                         group_bits.append(f"{bitstr}")
+        #                     else:
+        #                         # 保留的 Top-N 位置
+        #                         group_bits.append("   .  ")
                         
-                        # 每个 group 打印完后直接输出并换行
-                        print(" ".join(group_bits))
+        #                 # 每个 group 打印完后直接输出并换行
+        #                 print(" ".join(group_bits))
 
-                # 6. 还原回原始二维形状
-                Q = W_final.view(out_features, in_features)
-            else:
-                print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
+        #         # 6. 还原回原始二维形状
+        #         Q = W_final.view(out_features, in_features)
+        #     else:
+        #         print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
         # ================================================================
+
+        print("Applying exponent VQ...")
+        print("Groupsize:", groupsize)
+        out_features, in_features = Q.shape
+        W_temp = Q.view(out_features, -1, groupsize)
+        mask = torch.ones_like(W_temp, dtype=torch.bool)
+        print("Applying exponent VQ...")
+        print("Groupsize:", groupsize)
+        all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
+        if groupsize != -1:
+            W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
+        Q = W_vq.view(out_features, in_features)
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()

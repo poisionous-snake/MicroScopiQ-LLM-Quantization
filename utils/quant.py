@@ -22,7 +22,8 @@ class Quantizer(nn.Module):
     def __init__(self, shape=1):
         super(Quantizer, self).__init__()
         self.register_buffer('scale', torch.zeros(shape))
-        self.max_representable = 6.0 # E2M1 format
+        # self.max_representable = 6.0 # E2M1 format
+        self.max_representable = 448.0 # E4M3 format
 
     def configure(self, bits=4, groupsize=32):
         self.bits = bits
@@ -30,9 +31,13 @@ class Quantizer(nn.Module):
 
     def find_params(self, x, weight=False):
         max_vals, _ = torch.max(torch.abs(x), dim=1, keepdim=True)
-        exponents = torch.ceil(torch.log2(max_vals / self.max_representable + 1e-12))
-        exponents = torch.clamp(exponents, min=-(2**7), max=2**7-1)
-        self.scale = torch.pow(2.0, exponents)
+        # exponents = torch.ceil(torch.log2(max_vals / self.max_representable + 1e-12))
+        # exponents = torch.clamp(exponents, min=-(2**7), max=2**7-1)
+        # self.scale = torch.pow(2.0, exponents)
+
+        scale = max_vals / self.max_representable
+        scale = scale.clamp_(min=1e-6)
+        self.scale = scale
 
     def quantize(self, x):
         if self.ready():
