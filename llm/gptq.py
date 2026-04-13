@@ -308,37 +308,32 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
     
-    def vq(self, Q, all_scales, group_size=4, k=16, row_group_size=1):
+    def vq(self, Q, all_scales, k=16, row_group_size=1):
         """
         Q: dense quantized tensor with shape [out_features, G, group_size]
         all_scales: per-group scales with shape [out_features, G]
-        group_size: VQ的分组大小
         k: VQ的码本大小
         row_group_size: 相邻多少行共用一个VQ码本
         """
         assert row_group_size > 0
-        out_features, G, group_size = Q.shape
-        in_features = G * group_size
+        out_features, G, vq_dim = Q.shape
+        in_features = G * vq_dim
         device = Q.device
 
-        if all_scales.dim() == 2:
-            scale_dense = all_scales.unsqueeze(-1).expand(-1, -1, group_size)
-        else:
-            scale_dense = all_scales
-        assert scale_dense.shape == Q.shape
+        assert all_scales.shape == Q.shape
 
         # 还原到 FP8 空间
-        fp8_val = Q / scale_dense
+        fp8_val = Q / all_scales
 
         H_diag = self.H_diag
         if H_diag is not None:
-            H_dense = H_diag.view(1, G, group_size).expand(out_features, -1, -1)
+            H_dense = H_diag.view(1, G, vq_dim).expand(out_features, -1, -1)
         else:
             H_dense = None
 
         sign, exp, man = fp8_e4m3_decompose(fp8_val)
 
-        vq_group_span = 36
+        vq_group_span = 192 # full-row for 125m
         if G % vq_group_span != 0:
             raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
 
@@ -347,12 +342,12 @@ class GPTQ:
             row_end = min(row_start + row_group_size, out_features)
             for g_start in range(0, G, vq_group_span):
                 g_end = g_start + vq_group_span
-                block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
-                block_H = H_dense[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
+                block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, vq_dim)
+                block_H = H_dense[row_start:row_end, g_start:g_end, :].reshape(-1, vq_dim)
 
                 # ===== [NEW] block scale =====
-                block_scale = scale_dense[row_start:row_end, g_start:g_end, :]
-                block_scale = block_scale.reshape(-1, group_size)[:, :1]
+                block_scale = all_scales[row_start:row_end, g_start:g_end, :]
+                block_scale = block_scale.reshape(-1, vq_dim)[:, :1]
 
                 centroids, labels = weighted_kmeans_exp_v2(
                     block_exp,
@@ -362,14 +357,14 @@ class GPTQ:
                     iters=5
                 )
                 exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
-                    row_end - row_start, vq_group_span, group_size
+                    row_end - row_start, vq_group_span, vq_dim
                 )
 
         idx = (exp_q << 3) | man  # [out, G, d]
         lut = FP8_E4M3_LUT.to(device)  # [128]
         val = lut[idx]  # 正数
         val = torch.where(sign.bool(), -val, val)
-        val = val * scale_dense
+        val = val * all_scales
 
         return val.reshape(out_features, in_features)
 
@@ -622,13 +617,18 @@ class GPTQ:
         #         print(f"Warning: in_features({in_features}) is not divisible by {prunem}. Skipping N:M.")
         # ================================================================
 
-        print("Applying exponent VQ...")
-        print("Groupsize:", groupsize)
-        out_features, in_features = Q.shape
-        W_temp = Q.view(out_features, -1, groupsize)
-        all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
-        if groupsize != -1:
-            W_vq = self.vq(W_temp, all_scales, vq_dim, codebook_size, row_group_size)
+        if vq_dim != -1:
+            print("Applying exponent VQ...")
+            print("Groupsize:", groupsize)
+            out_features, in_features = Q.shape
+            W_temp = Q.view(out_features, -1, vq_dim)
+            all_scales = torch.cat([group.scale for group in groups], dim=1) # (out_features, in_features / groupsize)
+            assert(all_scales.shape[0] == out_features)
+            assert(all_scales.shape[1] == (in_features / groupsize))
+            all_scales = all_scales.unsqueeze(2).expand(-1, -1, groupsize)
+            all_scales = all_scales.reshape(out_features, -1, vq_dim)
+            W_vq = self.vq(W_temp, all_scales, codebook_size, row_group_size)
+
         Q = W_vq.view(out_features, in_features)
 
         if isinstance(self.layer, transformers.Conv1D):
