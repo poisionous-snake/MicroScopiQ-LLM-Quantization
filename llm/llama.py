@@ -126,14 +126,10 @@ def llama_sequential(model, dataloader, dev):
             gptq = {}
             for name in subset:
                 gptq[name] = GPTQ(subset[name])
-                gptq[name].quantizer = MXQuantizer() if args.use_mx else Quantizer()
+                gptq[name].quantizer = Quantizer()
                 gptq[name].quantizer.configure(
-                inlier_scale_bits = 8,
-                outlier_scale_bits = 8,
-                inlier_elem_format = 'int2',
-                outlier_elem_format = 'fp4',
-                axes = [0],
-                block_size=16
+                    bits=args.wbits,
+                    groupsize=args.groupsize
                 )
 
             def add_batch(name):
@@ -153,7 +149,16 @@ def llama_sequential(model, dataloader, dev):
                 print(i, name)
                 print('Quantizing ...')
                 gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
+                    percdamp=args.percdamp,
+                    groupsize=args.groupsize,
+                    actorder=args.act_order,
+                    static_groups=args.static_groups,
+                    prunen=args.prunen,
+                    prunem=args.prunem,
+                    plot=False,
+                    vq_dim=args.vq_dim,
+                    codebook_size=args.codebook_size,
+                    row_group_size=args.vq_row_group_size,
                 )
                 quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
@@ -223,35 +228,6 @@ def llama_eval(model, testenc, dev):
         print(i)
         layer = layers[i].to(dev)
         
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = MXQuantizer() if args.use_mx else Quantizer()
-                quantizer.configure(
-                inlier_scale_bits = 8,
-                outlier_scale_bits = 8,
-                inlier_elem_format = 'int2',
-                outlier_elem_format = 'fp4',
-                axes=[0],
-                block_size=16
-                )
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize_mx_outlier_v1(
-                    W,
-                    quantizer.inlier_scale_bits,
-                    quantizer.outlier_scale_bits,
-                    quantizer.inlier_elem_format,    # can be None for no quantization
-                    quantizer.outlier_elem_format,    # can be None for no quantization
-                    quantizer.shared_exp_method,
-                    quantizer.std_dev,
-                    quantizer.axes,
-                    quantizer.block_size,
-                    quantizer.round,
-                    quantizer.flush_fp32_subnorms,
-                    quantizer.custom_cuda
-                ).to(next(iter(layer.parameters())).dtype)
-
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
@@ -316,7 +292,7 @@ if __name__ == '__main__':
         help='Whether to run the RTN baseline.'
     ) 
     parser.add_argument(
-        '--wbits', type=int, default=16, choices=[2, 3, 4, 8, 16],
+        '--wbits', type=int, default=16, choices=[2, 3, 4, 16],
         help='#bits to use for quantization; use 16 for evaluating base model.'
     )
     parser.add_argument(
@@ -347,10 +323,25 @@ if __name__ == '__main__':
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
-
     parser.add_argument(
-        '--use-mx', action='store_true',
-        help='Whether to use MX Quantizer Class or Not'
+        '--prunen', type=int, default=0,
+        help='N for N:M pruning.'
+    )
+    parser.add_argument(
+        '--prunem', type=int, default=0,
+        help='M for N:M pruning.'
+    )
+    parser.add_argument(
+        '--vq_dim', type=int, default=4,
+        help='Dimension for VQ.'
+    )
+    parser.add_argument(
+        '--codebook_size', type=int, default=16,
+        help='Size of the codebook for VQ.'
+    )
+    parser.add_argument(
+        '--vq_row_group_size', type=int, default=16,
+        help='Size of the row groups for VQ.'
     )
 
     args = parser.parse_args()
