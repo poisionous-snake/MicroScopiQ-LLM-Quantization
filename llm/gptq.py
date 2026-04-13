@@ -308,46 +308,36 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
     
-    def vq(self, Q, mask, m, n, all_scales, group_size=4, k=16, row_group_size=1):
+    def vq(self, Q, all_scales, group_size=4, k=16, row_group_size=1):
         """
-        Q: 量化剪枝后的向量
-        groups: scale
+        Q: dense quantized tensor with shape [out_features, G, group_size]
+        all_scales: per-group scales with shape [out_features, G]
         group_size: VQ的分组大小
         k: VQ的码本大小
         row_group_size: 相邻多少行共用一个VQ码本
         """
         assert row_group_size > 0
-        out_features, in_features = Q.shape[0], Q.shape[1] * Q.shape[2]
+        out_features, G, group_size = Q.shape
+        in_features = G * group_size
         device = Q.device
 
-        # 还原到FP4空间
-        fp4_val = Q / all_scales
+        if all_scales.dim() == 2:
+            scale_dense = all_scales.unsqueeze(-1).expand(-1, -1, group_size)
+        else:
+            scale_dense = all_scales
+        assert scale_dense.shape == Q.shape
 
-        dense_out_feature = (in_features * n) // m
-        G = dense_out_feature // group_size
-        x = fp4_val.masked_select(mask).view(
-            out_features, G, group_size
-        )
+        # 还原到 FP8 空间
+        fp8_val = Q / scale_dense
 
-        # ===== 新增：Hessian 对齐到 dense =====
         H_diag = self.H_diag
-
         if H_diag is not None:
-            mask_flat = mask.view(out_features, -1)
-            col_idx = mask_flat.nonzero(as_tuple=False)[:, 1]
-            col_idx = col_idx.view(out_features, G, group_size)
-            H_dense = H_diag[col_idx]  # [out_features, G, group_size]
-            # ===== [NEW] scale 对齐到 dense =====
-            scale_dense = all_scales.masked_select(mask).view(
-                out_features, G, group_size
-            )
+            H_dense = H_diag.view(1, G, group_size).expand(out_features, -1, -1)
         else:
             H_dense = None
 
-        # 分解到FP8比特
-        sign, exp, man = fp8_e4m3_decompose(x)
+        sign, exp, man = fp8_e4m3_decompose(fp8_val)
 
-        # Split G into fixed-size sub-groups and run VQ independently per sub-group.
         vq_group_span = 36
         if G % vq_group_span != 0:
             raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
@@ -358,15 +348,11 @@ class GPTQ:
             for g_start in range(0, G, vq_group_span):
                 g_end = g_start + vq_group_span
                 block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
-                # block_man = man[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
-                block_H = H_dense[row_start:row_end, g_start:g_end, :]
-                block_H = block_H.reshape(-1, group_size)
+                block_H = H_dense[row_start:row_end, g_start:g_end, :].reshape(-1, group_size)
 
                 # ===== [NEW] block scale =====
                 block_scale = scale_dense[row_start:row_end, g_start:g_end, :]
-                block_scale = block_scale.reshape(-1, group_size)
-                # group内scale相同 → 取一列即可
-                block_scale = block_scale[:, :1]   # [N, 1]
+                block_scale = block_scale.reshape(-1, group_size)[:, :1]
 
                 centroids, labels = weighted_kmeans_exp_v2(
                     block_exp,
@@ -383,13 +369,9 @@ class GPTQ:
         lut = FP8_E4M3_LUT.to(device)  # [128]
         val = lut[idx]  # 正数
         val = torch.where(sign.bool(), -val, val)
+        val = val * scale_dense
 
-        # 重构为sparse格式
-        sparse_val = torch.zeros((out_features, in_features), device=device)
-        sparse_val.masked_scatter_(mask.view(out_features, in_features), val.reshape(out_features, -1))
-        val = sparse_val * all_scales.reshape(out_features, in_features)
-
-        return val
+        return val.reshape(out_features, in_features)
 
     def fasterquant(
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, prunen=0, prunem=0, plot=False, vq_dim=4, codebook_size=16, row_group_size=1
@@ -644,12 +626,9 @@ class GPTQ:
         print("Groupsize:", groupsize)
         out_features, in_features = Q.shape
         W_temp = Q.view(out_features, -1, groupsize)
-        mask = torch.ones_like(W_temp, dtype=torch.bool)
-        print("Applying exponent VQ...")
-        print("Groupsize:", groupsize)
         all_scales = torch.cat([group.scale for group in groups], dim=1) # (in_features, out_features / groupsize)
         if groupsize != -1:
-            W_vq = self.vq(W_temp, mask, prunem, prunen, all_scales, vq_dim, codebook_size, row_group_size)
+            W_vq = self.vq(W_temp, all_scales, vq_dim, codebook_size, row_group_size)
         Q = W_vq.view(out_features, in_features)
 
         if isinstance(self.layer, transformers.Conv1D):
