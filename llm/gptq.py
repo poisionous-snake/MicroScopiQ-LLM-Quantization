@@ -161,16 +161,14 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
 
     return centroids.long(), labels
 
-def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
+def kmeans_plus_plus_init(exp_g, k, LUT=None, H_weight=None, use_lut=True):
     """
     exp_g: [N, d]
     返回: 初始 centroids [k, d]
+    use_lut: whether to use FP8 LUT for distance calculation (set to False for residual)
     """
     device = exp_g.device
     N, d = exp_g.shape
-
-    # 转真实值空间（和你原算法一致）
-    val_real = LUT[(exp_g.long() << 3)].float()
 
     centroids = torch.empty((k, d), device=device)
 
@@ -182,10 +180,15 @@ def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
     closest_dist = None
 
     for i in range(1, k):
+        if use_lut:
+            # 转真实值空间（和你原算法一致）
+            val_real = LUT[(exp_g.long() << 3)].float()
+            val_c = LUT[(centroids[:i].long().unsqueeze(0) << 3)]
+            diff = val_real.unsqueeze(1) - val_c
+        else:
+            # For residual: directly use exp values
+            diff = exp_g.unsqueeze(1) - centroids[:i].unsqueeze(0)
 
-        val_c = LUT[(centroids[:i].long().unsqueeze(0) << 3)]
-
-        diff = val_real.unsqueeze(1) - val_c
         if H_weight is not None:
             dist = (diff ** 2 * H_weight.unsqueeze(1)).sum(-1)
         else:
@@ -234,12 +237,10 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_
 
     # ===== KMeans++ 初始化（替换原 random init）=====
     if use_lut:
-        centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff)
+        centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff, use_lut=True)
     else:
-        # For residual, simple random init from unique values
-        unique_exp = torch.unique(exp_g, dim=0)
-        idx = torch.randperm(unique_exp.shape[0])[:k]
-        centroids = unique_exp[idx].float()
+        # For residual, also use KMeans++ initialization
+        centroids = kmeans_plus_plus_init(exp_g, k, None, H_eff, use_lut=False)
 
     for _ in range(iters):
         if use_lut:
@@ -346,7 +347,8 @@ class GPTQ:
 
         sign, exp, man = fp8_e4m3_decompose(fp8_val)
 
-        vq_group_span = 192 # full-row for 125m
+        # vq_group_span = 192 # full-row for 125m
+        vq_group_span = 512 # full-row for 1.3b
         if G % vq_group_span != 0:
             raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
 
@@ -391,6 +393,7 @@ class GPTQ:
                 )
 
         exp_q = exp_q1 + exp_q2
+        exp_q = exp_q.clamp(0, 15)  # 确保指数在FP8范围内
 
         idx = (exp_q << 3) | man  # [out, G, d]
         lut = FP8_E4M3_LUT.to(device)  # [128]
