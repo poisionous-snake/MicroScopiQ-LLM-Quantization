@@ -208,10 +208,11 @@ def kmeans_plus_plus_init(exp_g, k, LUT, H_weight=None):
     return centroids
 
 
-def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
+def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_lut=True):
     """
     exp_g: [N, d]
     H_weight: [N, d]  (element-wise Hessian weight)
+    use_lut: whether to use FP8 LUT for distance calculation (set to False for residual)
     """
     device = exp_g.device
     N, d = exp_g.shape
@@ -230,15 +231,24 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
             H_eff = scale ** 2
     else:
         H_eff = H_weight
-    
+
     # ===== KMeans++ 初始化（替换原 random init）=====
-    centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff)
+    if use_lut:
+        centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff)
+    else:
+        # For residual, simple random init from unique values
+        unique_exp = torch.unique(exp_g, dim=0)
+        idx = torch.randperm(unique_exp.shape[0])[:k]
+        centroids = unique_exp[idx].float()
 
     for _ in range(iters):
-        val_real = LUT[(exp_g.long() << 3)]
-        val_c = LUT[(centroids.long().unsqueeze(0) << 3)]
-
-        diff = val_real.unsqueeze(1) - val_c
+        if use_lut:
+            val_real = LUT[(exp_g.long() << 3)]
+            val_c = LUT[(centroids.long().unsqueeze(0) << 3)]
+            diff = val_real.unsqueeze(1) - val_c
+        else:
+            # For residual: directly use exp values
+            diff = exp_g.unsqueeze(1) - centroids.unsqueeze(0)
 
         if H_eff is not None:
             dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
@@ -260,8 +270,11 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5):
         mask = weight_sum > 0
         centroids[mask] = centroids_new[mask] / weight_sum[mask]
 
-        # 离散化
-        centroids = centroids.round().clamp(0, 15)
+        # 离散化 - for residual don't clamp to 0-15
+        if use_lut:
+            centroids = centroids.round().clamp(0, 15)
+        else:
+            centroids = centroids.round().clamp(-8, 7)
 
     return centroids.long(), labels
 
@@ -337,7 +350,8 @@ class GPTQ:
         if G % vq_group_span != 0:
             raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
 
-        exp_q = torch.empty_like(exp)
+        exp_q1 = torch.empty_like(exp)
+        exp_q2 = torch.empty_like(exp)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
             for g_start in range(0, G, vq_group_span):
@@ -349,16 +363,34 @@ class GPTQ:
                 block_scale = all_scales[row_start:row_end, g_start:g_end, :]
                 block_scale = block_scale.reshape(-1, vq_dim)[:, :1]
 
-                centroids, labels = weighted_kmeans_exp_v2(
+                # First VQ on exp
+                centroids1, labels1 = weighted_kmeans_exp_v2(
                     block_exp,
                     k=k,
                     H_weight=block_H,
                     scale = block_scale,
                     iters=5
                 )
-                exp_q[row_start:row_end, g_start:g_end, :] = centroids[labels].view(
+                block_exp_q1 = centroids1[labels1]
+                exp_q1[row_start:row_end, g_start:g_end, :] = block_exp_q1.view(
                     row_end - row_start, vq_group_span, vq_dim
                 )
+
+                # Second VQ on residual (exp - exp_q1)
+                block_residual = block_exp - block_exp_q1
+                centroids2, labels2 = weighted_kmeans_exp_v2(
+                    block_residual,
+                    k=k,
+                    H_weight=block_H,
+                    scale = block_scale,
+                    iters=5,
+                    use_lut=False
+                )
+                exp_q2[row_start:row_end, g_start:g_end, :] = centroids2[labels2].view(
+                    row_end - row_start, vq_group_span, vq_dim
+                )
+
+        exp_q = exp_q1 + exp_q2
 
         idx = (exp_q << 3) | man  # [out, G, d]
         lut = FP8_E4M3_LUT.to(device)  # [128]
