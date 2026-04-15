@@ -180,9 +180,12 @@ def mahalanobis_init(exp_g, k):
             idx = torch.cat([torch.arange(unique_exp.shape[0], device=device), pad_idx])
         return unique_exp[idx].float()
 
+    # Convert to float for computations
+    exp_g_float = exp_g.float()
+
     # Compute mean and center the data
-    mu = exp_g.mean(dim=0, keepdim=True)
-    X_centered = exp_g - mu
+    mu = exp_g_float.mean(dim=0, keepdim=True)
+    X_centered = exp_g_float - mu
 
     # Compute covariance matrix (d x d)
     Sigma = X_centered.t() @ X_centered / (N - 1)
@@ -428,7 +431,8 @@ class GPTQ:
                     k=k,
                     H_weight=block_H,
                     scale = block_scale,
-                    iters=5
+                    iters=5,
+                    init_method="mahalanobis"
                 )
                 block_exp_q1 = centroids1[labels1]
                 exp_q1[row_start:row_end, g_start:g_end, :] = block_exp_q1.view(
@@ -443,7 +447,8 @@ class GPTQ:
                     H_weight=block_H,
                     scale = block_scale,
                     iters=5,
-                    use_lut=False
+                    use_lut=False, 
+                    init_method="mahalanobis"
                 )
                 exp_q2[row_start:row_end, g_start:g_end, :] = centroids2[labels2].view(
                     row_end - row_start, vq_group_span, vq_dim
