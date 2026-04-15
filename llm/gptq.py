@@ -161,6 +161,58 @@ def kmeans_exp_vq(exp_g, man_g, k=16, iters=10):
 
     return centroids.long(), labels
 
+def mahalanobis_init(exp_g, k):
+    """
+    Mahalanobis distance based initialization for K-means.
+    exp_g: [N, d]
+    返回: 初始 centroids [k, d]
+    """
+    device = exp_g.device
+    N, d = exp_g.shape
+
+    if d == 1 or N < d:
+        # Fallback to random selection from unique values if dimensionality is too low
+        unique_exp = torch.unique(exp_g, dim=0)
+        idx = torch.randperm(min(unique_exp.shape[0], k))[:k]
+        if unique_exp.shape[0] < k:
+            # If not enough unique values, pad with random selections
+            pad_idx = torch.randint(0, unique_exp.shape[0], (k - unique_exp.shape[0],), device=device)
+            idx = torch.cat([torch.arange(unique_exp.shape[0], device=device), pad_idx])
+        return unique_exp[idx].float()
+
+    # Compute mean and center the data
+    mu = exp_g.mean(dim=0, keepdim=True)
+    X_centered = exp_g - mu
+
+    # Compute covariance matrix (d x d)
+    Sigma = X_centered.t() @ X_centered / (N - 1)
+
+    # Add small epsilon for numerical stability
+    Sigma = Sigma + torch.eye(d, device=device) * 1e-6
+
+    try:
+        # Compute inverse of covariance matrix
+        Lambda = torch.linalg.inv(Sigma)
+
+        # Compute Mahalanobis distances from mean
+        dists = ((X_centered @ Lambda) * X_centered).sum(dim=1)
+
+        # Sort by distance and select evenly spaced points
+        sorted_indices = torch.argsort(dists)
+        idx = torch.round(torch.linspace(0, N - 1, k, device=device)).long()
+        selected_indices = sorted_indices[idx]
+
+        return exp_g[selected_indices].float()
+    except:
+        # Fallback to random selection from unique values if inversion fails
+        unique_exp = torch.unique(exp_g, dim=0)
+        idx = torch.randperm(min(unique_exp.shape[0], k))[:k]
+        if unique_exp.shape[0] < k:
+            pad_idx = torch.randint(0, unique_exp.shape[0], (k - unique_exp.shape[0],), device=device)
+            idx = torch.cat([torch.arange(unique_exp.shape[0], device=device), pad_idx])
+        return unique_exp[idx].float()
+
+
 def kmeans_plus_plus_init(exp_g, k, LUT=None, H_weight=None, use_lut=True):
     """
     exp_g: [N, d]
@@ -211,11 +263,12 @@ def kmeans_plus_plus_init(exp_g, k, LUT=None, H_weight=None, use_lut=True):
     return centroids
 
 
-def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_lut=True):
+def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_lut=True, init_method="kmeans++"):
     """
     exp_g: [N, d]
     H_weight: [N, d]  (element-wise Hessian weight)
     use_lut: whether to use FP8 LUT for distance calculation (set to False for residual)
+    init_method: "kmeans++" (default) or "mahalanobis"
     """
     device = exp_g.device
     N, d = exp_g.shape
@@ -235,12 +288,16 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_
     else:
         H_eff = H_weight
 
-    # ===== KMeans++ 初始化（替换原 random init）=====
-    if use_lut:
-        centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff, use_lut=True)
+    # ===== 初始化方法选择 =====
+    if init_method == "mahalanobis":
+        # Mahalanobis initialization (ignores LUT for initialization)
+        centroids = mahalanobis_init(exp_g, k)
     else:
-        # For residual, also use KMeans++ initialization
-        centroids = kmeans_plus_plus_init(exp_g, k, None, H_eff, use_lut=False)
+        # KMeans++ initialization (default)
+        if use_lut:
+            centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff, use_lut=True)
+        else:
+            centroids = kmeans_plus_plus_init(exp_g, k, None, H_eff, use_lut=False)
 
     for _ in range(iters):
         if use_lut:
