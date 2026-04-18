@@ -382,7 +382,7 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
     
-    def vq(self, Q, all_scales, k=16, row_group_size=1):
+    def vq(self, Q, all_scales, k=16, row_group_size=1, plot=False):
         """
         Q: dense quantized tensor with shape [out_features, G, group_size]
         all_scales: per-group scales with shape [out_features, G]
@@ -456,6 +456,17 @@ class GPTQ:
 
         exp_q = exp_q1 + exp_q2
         exp_q = exp_q.clamp(0, 15)  # 确保指数在FP8范围内
+
+        # 统计 exp_q 的分布
+        if plot:
+            exp_q_flat = exp_q.flatten()
+            print("="*60)
+            for i in range(16):
+                count = (exp_q_flat == i).sum().item()
+                if count > 0:
+                    percentage = 100.0 * count / exp_q_flat.numel()
+                    print(f"    {i-7}: {count:>10} ({percentage:6.3f}%)")
+            print("="*60)
 
         idx = (exp_q << 3) | man  # [out, G, d]
         lut = FP8_E4M3_LUT.to(device)  # [128]
@@ -724,7 +735,7 @@ class GPTQ:
             assert(all_scales.shape[1] == (in_features / groupsize))
             all_scales = all_scales.unsqueeze(2).expand(-1, -1, groupsize)
             all_scales = all_scales.reshape(out_features, -1, vq_dim)
-            W_vq = self.vq(W_temp, all_scales, codebook_size, row_group_size)
+            W_vq = self.vq(W_temp, all_scales, codebook_size, row_group_size, plot)
 
         Q = W_vq.view(out_features, in_features)
 
