@@ -276,11 +276,12 @@ def _save_codebook_to_file(centroids, row_start, codebook_id):
         for i, row in enumerate(cb_sorted):
             f.write(f'  [{i}]: {row.cpu().numpy()}\n')
 
-def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, init_method="kmeans++"):
+def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, init_method="kmeans++", batch_size=4096):
     """
     fp8_idx: [N, d], FP8 index (exp<<3 | man), 0-127
     H_weight: [N, d]  (element-wise Hessian weight)
     init_method: "kmeans++" (default) or "mahalanobis"
+    batch_size: batch size for distance computation to avoid OOM
     Returns: centroids_fp8, labels
     """
     device = fp8_idx.device
@@ -303,10 +304,10 @@ def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, in
 
     # ===== 初始化方法选择 =====
     if init_method == "mahalanobis":
-        # Mahalanobis initialization on fp8_idx values (use fp8_idx directly
+        # Mahalanobis initialization on fp8_idx values (use fp8_idx directly)
         centroids = mahalanobis_init(fp8_idx.float(), k)
     else:
-        # KMeans++ initialization
+        # KMeans++ initialization with batch processing
         centroids = torch.empty((k, d), device=device)
         # 1️⃣ 随机选第一个
         idx = torch.randint(0, N, (1,), device=device)
@@ -314,17 +315,24 @@ def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, in
 
         closest_dist = None
         for i in range(1, k):
-            # Use LUT distance on fp8 indices
-            val_real = LUT[fp8_idx.long()]
-            val_c = LUT[centroids[:i].long().unsqueeze(0)]
-            diff = val_real.unsqueeze(1) - val_c
+            # Use batch processing for distance calculation
+            min_dist = torch.empty((N,), device=device)
+            val_c = LUT[centroids[:i].long()]  # [i, d]
 
-            if H_eff is not None:
-                dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
-            else:
-                dist = (diff ** 2).sum(-1)
+            for start in range(0, N, batch_size):
+                end = min(start + batch_size, N)
+                batch_fp8 = fp8_idx[start:end]
+                batch_val = LUT[batch_fp8.long()]  # [B, d]
 
-            min_dist, _ = dist.min(dim=1)
+                # Compute distance for this batch
+                diff = batch_val.unsqueeze(1) - val_c.unsqueeze(0)  # [B, i, d]
+                if H_eff is not None:
+                    batch_H = H_eff[start:end]
+                    dist = (diff ** 2 * batch_H.unsqueeze(1)).sum(-1)
+                else:
+                    dist = (diff ** 2).sum(-1)
+
+                min_dist[start:end], _ = dist.min(dim=1)
 
             if closest_dist is None:
                 closest_dist = min_dist
@@ -337,17 +345,24 @@ def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, in
             centroids[i] = fp8_idx[idx]
 
     for _ in range(iters):
-        # Distance in LUT value space
-        val_real = LUT[fp8_idx.long()]
-        val_c = LUT[centroids.long().unsqueeze(0)]
-        diff = val_real.unsqueeze(1) - val_c
+        # Distance in LUT value space with batch processing
+        labels = torch.empty((N,), dtype=torch.long, device=device)
+        val_c = LUT[centroids.long()]  # [k, d]
 
-        if H_eff is not None:
-            dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
-        else:
-            dist = (diff ** 2).sum(-1)
+        for start in range(0, N, batch_size):
+            end = min(start + batch_size, N)
+            batch_fp8 = fp8_idx[start:end]
+            batch_val = LUT[batch_fp8.long()]  # [B, d]
 
-        labels = dist.argmin(dim=1)
+            # Compute distance for this batch
+            diff = batch_val.unsqueeze(1) - val_c.unsqueeze(0)  # [B, k, d]
+            if H_eff is not None:
+                batch_H = H_eff[start:end]
+                dist = (diff ** 2 * batch_H.unsqueeze(1)).sum(-1)
+            else:
+                dist = (diff ** 2).sum(-1)
+
+            labels[start:end] = dist.argmin(dim=1)
 
         # ===== vectorized update =====
         centroids_new = torch.zeros_like(centroids, dtype=torch.float32)
