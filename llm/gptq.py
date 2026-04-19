@@ -276,23 +276,23 @@ def _save_codebook_to_file(centroids, row_start, codebook_id):
         for i, row in enumerate(cb_sorted):
             f.write(f'  [{i}]: {row.cpu().numpy()}\n')
 
-def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_lut=True, init_method="kmeans++"):
+def weighted_kmeans_fp8_v2(fp8_idx, k=16, H_weight=None, scale=None, iters=5, init_method="kmeans++"):
     """
-    exp_g: [N, d]
+    fp8_idx: [N, d], FP8 index (exp<<3 | man), 0-127
     H_weight: [N, d]  (element-wise Hessian weight)
-    use_lut: whether to use FP8 LUT for distance calculation (set to False for residual)
     init_method: "kmeans++" (default) or "mahalanobis"
+    Returns: centroids_fp8, labels
     """
-    device = exp_g.device
-    N, d = exp_g.shape
+    device = fp8_idx.device
+    N, d = fp8_idx.shape
 
-    LUT = FP8_E4M3_LUT.to(exp_g.device)
+    LUT = FP8_E4M3_LUT.to(fp8_idx.device)
 
     # ===== [NEW] 融合 scale 到 H =====
     if scale is not None:
         # scale: [N, 1] 或 [N, d]
         if scale.dim() == 2 and scale.shape[1] == 1:
-            scale = scale.expand_as(exp_g)   # broadcast到每个元素
+            scale = scale.expand_as(fp8_idx)   # broadcast到每个元素
 
         if H_weight is not None:
             H_eff = H_weight * (scale ** 2)
@@ -303,23 +303,44 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_
 
     # ===== 初始化方法选择 =====
     if init_method == "mahalanobis":
-        # Mahalanobis initialization (ignores LUT for initialization)
-        centroids = mahalanobis_init(exp_g, k)
+        # Mahalanobis initialization on fp8_idx values (use fp8_idx directly
+        centroids = mahalanobis_init(fp8_idx.float(), k)
     else:
-        # KMeans++ initialization (default)
-        if use_lut:
-            centroids = kmeans_plus_plus_init(exp_g, k, LUT, H_eff, use_lut=True)
-        else:
-            centroids = kmeans_plus_plus_init(exp_g, k, None, H_eff, use_lut=False)
+        # KMeans++ initialization
+        centroids = torch.empty((k, d), device=device)
+        # 1️⃣ 随机选第一个
+        idx = torch.randint(0, N, (1,), device=device)
+        centroids[0] = fp8_idx[idx]
+
+        closest_dist = None
+        for i in range(1, k):
+            # Use LUT distance on fp8 indices
+            val_real = LUT[fp8_idx.long()]
+            val_c = LUT[centroids[:i].long().unsqueeze(0)]
+            diff = val_real.unsqueeze(1) - val_c
+
+            if H_eff is not None:
+                dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
+            else:
+                dist = (diff ** 2).sum(-1)
+
+            min_dist, _ = dist.min(dim=1)
+
+            if closest_dist is None:
+                closest_dist = min_dist
+            else:
+                closest_dist = torch.minimum(closest_dist, min_dist)
+
+            prob = closest_dist + 1e-8
+            prob = prob / prob.sum()
+            idx = torch.multinomial(prob, 1)
+            centroids[i] = fp8_idx[idx]
 
     for _ in range(iters):
-        if use_lut:
-            val_real = LUT[(exp_g.long() << 3)]
-            val_c = LUT[(centroids.long().unsqueeze(0) << 3)]
-            diff = val_real.unsqueeze(1) - val_c
-        else:
-            # For residual: directly use exp values
-            diff = exp_g.unsqueeze(1) - centroids.unsqueeze(0)
+        # Distance in LUT value space
+        val_real = LUT[fp8_idx.long()]
+        val_c = LUT[centroids.long().unsqueeze(0)]
+        diff = val_real.unsqueeze(1) - val_c
 
         if H_eff is not None:
             dist = (diff ** 2 * H_eff.unsqueeze(1)).sum(-1)
@@ -328,24 +349,20 @@ def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_
 
         labels = dist.argmin(dim=1)
 
-        # ===== vectorized update（关键优化版）=====
-        centroids_new = torch.zeros_like(centroids)
-        weight_sum = torch.zeros_like(centroids)
+        # ===== vectorized update =====
+        centroids_new = torch.zeros_like(centroids, dtype=torch.float32)
+        weight_sum = torch.zeros_like(centroids, dtype=torch.float32)
 
         for j in range(d):
             wj = H_eff[:, j] if H_eff is not None else torch.ones(N, device=device)
-
-            centroids_new[:, j].index_add_(0, labels, exp_g[:, j].float() * wj)
+            centroids_new[:, j].index_add_(0, labels, fp8_idx[:, j].float() * wj)
             weight_sum[:, j].index_add_(0, labels, wj)
 
         mask = weight_sum > 0
         centroids[mask] = centroids_new[mask] / weight_sum[mask]
 
-        # 离散化 - for residual don't clamp to 0-15
-        if use_lut:
-            centroids = centroids.round().clamp(0, 15)
-        else:
-            centroids = centroids.round().clamp(-8, 7)
+        # 离散化到 FP8 index 范围
+        centroids = centroids.round().clamp(0, 127)
 
     return centroids.long(), labels
 
@@ -417,23 +434,26 @@ class GPTQ:
 
         sign, exp, man = fp8_e4m3_decompose(fp8_val)
 
-        exp_q1 = torch.empty_like(exp)
-        exp_q2 = torch.empty_like(exp)
+        # FP8 index: exp<<3 | man (后7位)
+        fp8_idx = (exp << 3) | man
+
+        fp8_idx_q1 = torch.empty_like(fp8_idx)
+        fp8_idx_q2 = torch.empty_like(fp8_idx)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
-            block_exp = exp[row_start:row_end, ...].reshape(-1, vq_dim)
+            block_fp8_idx = fp8_idx[row_start:row_end, ...].reshape(-1, vq_dim)
             block_H = H_dense[row_start:row_end, ...].reshape(-1, vq_dim)
 
             # ===== [NEW] block scale =====
             block_scale = all_scales[row_start:row_end, ...]
             block_scale = block_scale.reshape(-1, vq_dim)[:, :1]
 
-            # First VQ on exp
-            centroids1, labels1 = weighted_kmeans_exp_v2(
-                block_exp,
+            # First VQ on fp8_idx (exp+man combined)
+            centroids1, labels1 = weighted_kmeans_fp8_v2(
+                block_fp8_idx,
                 k=k,
                 H_weight=block_H,
-                scale = block_scale,
+                scale=block_scale,
                 iters=5,
                 init_method="mahalanobis"
             )
@@ -445,20 +465,19 @@ class GPTQ:
                 if codebook_key not in self._codebook_printed:
                     self._codebook_printed.add(codebook_key)
                     _save_codebook_to_file(centroids1, row_start, 1)
-            block_exp_q1 = centroids1[labels1]
-            exp_q1[row_start:row_end, ...] = block_exp_q1.view(
+            block_fp8_idx_q1 = centroids1[labels1]
+            fp8_idx_q1[row_start:row_end, ...] = block_fp8_idx_q1.view(
                 row_end - row_start, -1, vq_dim
             )
 
-            # Second VQ on residual (exp - exp_q1)
-            block_residual = block_exp - block_exp_q1
-            centroids2, labels2 = weighted_kmeans_exp_v2(
+            # Second VQ on residual (fp8_idx - fp8_idx_q1)
+            block_residual = block_fp8_idx - block_fp8_idx_q1
+            centroids2, labels2 = weighted_kmeans_fp8_v2(
                 block_residual,
                 k=k,
                 H_weight=block_H,
-                scale = block_scale,
+                scale=block_scale,
                 iters=5,
-                use_lut=False,
                 init_method="mahalanobis"
             )
             # Print codebook 2 to file
@@ -467,27 +486,27 @@ class GPTQ:
                 if codebook_key not in self._codebook_printed:
                     self._codebook_printed.add(codebook_key)
                     _save_codebook_to_file(centroids2, row_start, 2)
-            exp_q2[row_start:row_end, ...] = centroids2[labels2].view(
+            fp8_idx_q2[row_start:row_end, ...] = centroids2[labels2].view(
                 row_end - row_start, -1, vq_dim
             )
 
-        exp_q = exp_q1 + exp_q2
-        exp_q = exp_q.clamp(0, 15)  # 确保指数在FP8范围内
+        fp8_idx_q = fp8_idx_q1 + fp8_idx_q2
+        fp8_idx_q = fp8_idx_q.clamp(0, 127)  # 确保在FP8索引范围内
 
-        # 统计 exp_q 的分布
+        # 统计 fp8_idx_q 的分布
         if plot:
-            exp_q_flat = exp_q.flatten()
+            fp8_idx_q_flat = fp8_idx_q.flatten()
             print("="*60)
-            for i in range(16):
-                count = (exp_q_flat == i).sum().item()
+            print("FP8 index distribution (exp<<3 | man):")
+            for i in range(128):
+                count = (fp8_idx_q_flat == i).sum().item()
                 if count > 0:
-                    percentage = 100.0 * count / exp_q_flat.numel()
-                    print(f"    {i-7}: {count:>10} ({percentage:6.3f}%)")
+                    percentage = 100.0 * count / fp8_idx_q_flat.numel()
+                    print(f"    [{i:3d}]: {count:>10} ({percentage:6.3f}%)")
             print("="*60)
 
-        idx = (exp_q << 3) | man  # [out, G, d]
         lut = FP8_E4M3_LUT.to(device)  # [128]
-        val = lut[idx]  # 正数
+        val = lut[fp8_idx_q]  # 正数
         val = torch.where(sign.bool(), -val, val)
         val = val * all_scales
 
