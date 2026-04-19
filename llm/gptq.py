@@ -265,6 +265,16 @@ def kmeans_plus_plus_init(exp_g, k, LUT=None, H_weight=None, use_lut=True):
 
     return centroids
 
+def _save_codebook_to_file(centroids, row_start, codebook_id):
+    sorted_indices = torch.argsort(centroids.sum(dim=1))
+    cb_sorted = centroids[sorted_indices]
+    # Write to file
+    filename = f'codebook{codebook_id}.txt'
+    with open(filename, 'a') as f:
+        f.write(f'Codebook {codebook_id} - row_start={row_start}\n')
+        f.write(f'Sorted by sum of values:\n')
+        for i, row in enumerate(cb_sorted):
+            f.write(f'  [{i}]: {row.cpu().numpy()}\n')
 
 def weighted_kmeans_exp_v2(exp_g, k=16, H_weight=None, scale=None, iters=5, use_lut=True, init_method="kmeans++"):
     """
@@ -407,52 +417,59 @@ class GPTQ:
 
         sign, exp, man = fp8_e4m3_decompose(fp8_val)
 
-        # vq_group_span = 192 # full-row for 125m
-        vq_group_span = 512 # full-row for 1.3b
-        if G % vq_group_span != 0:
-            raise ValueError(f"G={G} is not divisible by vq_group_span={vq_group_span}")
-
         exp_q1 = torch.empty_like(exp)
         exp_q2 = torch.empty_like(exp)
         for row_start in range(0, out_features, row_group_size):
             row_end = min(row_start + row_group_size, out_features)
-            for g_start in range(0, G, vq_group_span):
-                g_end = g_start + vq_group_span
-                block_exp = exp[row_start:row_end, g_start:g_end, :].reshape(-1, vq_dim)
-                block_H = H_dense[row_start:row_end, g_start:g_end, :].reshape(-1, vq_dim)
+            block_exp = exp[row_start:row_end, ...].reshape(-1, vq_dim)
+            block_H = H_dense[row_start:row_end, ...].reshape(-1, vq_dim)
 
-                # ===== [NEW] block scale =====
-                block_scale = all_scales[row_start:row_end, g_start:g_end, :]
-                block_scale = block_scale.reshape(-1, vq_dim)[:, :1]
+            # ===== [NEW] block scale =====
+            block_scale = all_scales[row_start:row_end, ...]
+            block_scale = block_scale.reshape(-1, vq_dim)[:, :1]
 
-                # First VQ on exp
-                centroids1, labels1 = weighted_kmeans_exp_v2(
-                    block_exp,
-                    k=k,
-                    H_weight=block_H,
-                    scale = block_scale,
-                    iters=5,
-                    init_method="mahalanobis"
-                )
-                block_exp_q1 = centroids1[labels1]
-                exp_q1[row_start:row_end, g_start:g_end, :] = block_exp_q1.view(
-                    row_end - row_start, vq_group_span, vq_dim
-                )
+            # First VQ on exp
+            centroids1, labels1 = weighted_kmeans_exp_v2(
+                block_exp,
+                k=k,
+                H_weight=block_H,
+                scale = block_scale,
+                iters=5,
+                init_method="mahalanobis"
+            )
+            # Print codebook 1 to file
+            if plot:
+                if not hasattr(self, '_codebook_printed'):
+                    self._codebook_printed = set()
+                codebook_key = (row_start, 1)
+                if codebook_key not in self._codebook_printed:
+                    self._codebook_printed.add(codebook_key)
+                    _save_codebook_to_file(centroids1, row_start, 1)
+            block_exp_q1 = centroids1[labels1]
+            exp_q1[row_start:row_end, ...] = block_exp_q1.view(
+                row_end - row_start, -1, vq_dim
+            )
 
-                # Second VQ on residual (exp - exp_q1)
-                block_residual = block_exp - block_exp_q1
-                centroids2, labels2 = weighted_kmeans_exp_v2(
-                    block_residual,
-                    k=k,
-                    H_weight=block_H,
-                    scale = block_scale,
-                    iters=5,
-                    use_lut=False, 
-                    init_method="mahalanobis"
-                )
-                exp_q2[row_start:row_end, g_start:g_end, :] = centroids2[labels2].view(
-                    row_end - row_start, vq_group_span, vq_dim
-                )
+            # Second VQ on residual (exp - exp_q1)
+            block_residual = block_exp - block_exp_q1
+            centroids2, labels2 = weighted_kmeans_exp_v2(
+                block_residual,
+                k=k,
+                H_weight=block_H,
+                scale = block_scale,
+                iters=5,
+                use_lut=False,
+                init_method="mahalanobis"
+            )
+            # Print codebook 2 to file
+            if plot:
+                codebook_key = (row_start, 2)
+                if codebook_key not in self._codebook_printed:
+                    self._codebook_printed.add(codebook_key)
+                    _save_codebook_to_file(centroids2, row_start, 2)
+            exp_q2[row_start:row_end, ...] = centroids2[labels2].view(
+                row_end - row_start, -1, vq_dim
+            )
 
         exp_q = exp_q1 + exp_q2
         exp_q = exp_q.clamp(0, 15)  # 确保指数在FP8范围内
