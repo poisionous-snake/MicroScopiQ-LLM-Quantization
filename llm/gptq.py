@@ -90,23 +90,30 @@ def fp4_e2m1_decompose(tensor):
 
     return sign, exponent, mantissa
 
-def fp8_e4m3_decompose(tensor):
+def fp8_e4m3_decompose(tensor, batch_size=16384):
     """
     Hardcoded FP8(E4M3) decomposition.
     Returns: sign, exponent_bits (0–15), mantissa_bits (0–7)
     """
     x = tensor.clone()
+    device = x.device
 
     # sign bit
     sign = (x < 0).int()
     x = x.abs()
 
     # flatten for vectorized LUT match
-    x_flat = x.view(-1, 1)
-    lut = FP8_E4M3_LUT.to(x.device).view(1, -1)
+    x_flat = x.view(-1)
+    lut = FP8_E4M3_LUT.to(device)
+    idx = torch.empty_like(x_flat, dtype=torch.long, device=device)
 
-    # nearest FP8 value
-    idx = torch.argmin((x_flat - lut).abs(), dim=1)
+    # Process in batches to avoid OOM
+    for start in range(0, x_flat.shape[0], batch_size):
+        end = min(start + batch_size, x_flat.shape[0])
+        batch = x_flat[start:end].unsqueeze(1)  # [B, 1]
+        # Compute distance for this batch
+        dist = (batch - lut.unsqueeze(0)).abs()  # [B, 128]
+        idx[start:end] = dist.argmin(dim=1)
 
     exponent = (idx >> 3).view(x.shape)   # high 4 bits
     mantissa = (idx & 7).view(x.shape)    # low 3 bits
